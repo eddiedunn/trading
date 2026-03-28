@@ -19,6 +19,9 @@ __pycache__/
 .idea/
 .vscode/
 
+# Test cache
+.pytest_cache/
+
 # Backtest results (generated, not committed)
 backtest_results/
 

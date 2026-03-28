@@ -1,0 +1,33 @@
+{
+  "exchange": {
+    "name": "hyperliquid",
+    "walletAddress": "WALLET_ADDRESS_HERE",
+    "privateKey": "PRIVATE_KEY_HERE",
+    "options": {
+      "defaultType": "swap"
+    }
+  },
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "stake_currency": "USDC",
+  "stake_amount": 33,
+  "max_open_trades": 3,
+  "timeframe": "4h",
+  "pair_whitelist": [
+    "BTC/USDC:USDC",
+    "ETH/USDC:USDC",
+    "SOL/USDC:USDC"
+  ],
+  "dry_run": false,
+  "stoploss": -0.05,
+  "trailing_stop": true,
+  "trailing_stop_positive": 0.02,
+  "api_server": {
+    "enabled": true,
+    "listen_ip_address": "0.0.0.0",
+    "listen_port": 8080,
+    "username": "freqtrade",
+    "password": "CHANGEME",
+    "jwt_secret_key": "CHANGEME"
+  }
+}

@@ -1,0 +1,92 @@
+---
+# Deploy backtest-api to tela (rootless, user-level Quadlet)
+#
+# Usage (run on tela as eddie with local connection):
+#   ansible-playbook -i "127.0.0.1," deploy/ansible-deploy.yml \
+#     --connection local -e trading_src_dir=<path>
+#
+# Variables:
+#   trading_src_dir: path to checked-out repo on tela
+
+- name: Deploy backtest-api
+  hosts: all
+  gather_facts: false
+
+  vars:
+    service_name: backtest-api
+    quadlet_dir: /home/eddie/.config/containers/systemd
+    trading_src_dir: "{{ ansible_env.HOME }}/trading"
+
+  tasks:
+    - name: Ensure data directories exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /opt/trading/data
+        - /opt/trading/strategies
+        - /opt/trading/strategies/candidates
+        - /opt/trading/backtest_results
+        - /opt/trading/logs
+
+    - name: Build container image from source
+      ansible.builtin.command:
+        cmd: >
+          podman build
+          -t localhost/backtest-api:latest
+          -f deploy/Dockerfile
+          .
+        chdir: "{{ trading_src_dir }}"
+      changed_when: true
+      notify: Reload and restart backtest-api
+
+    - name: Tag image for registry
+      ansible.builtin.command:
+        cmd: >
+          podman tag
+          localhost/backtest-api:latest
+          registry.starbluesolutions.net/backtest-api:{{ build_number | default('latest') }}
+      changed_when: true
+
+    - name: Tag image as latest in registry
+      ansible.builtin.command:
+        cmd: >
+          podman tag
+          localhost/backtest-api:latest
+          registry.starbluesolutions.net/backtest-api:latest
+      changed_when: true
+
+    - name: Push build tag to registry
+      ansible.builtin.command:
+        cmd: podman push registry.starbluesolutions.net/backtest-api:{{ build_number | default('latest') }}
+      changed_when: true
+
+    - name: Push latest tag to registry
+      ansible.builtin.command:
+        cmd: podman push registry.starbluesolutions.net/backtest-api:latest
+      changed_when: true
+
+    - name: Copy quadlet container unit file
+      ansible.builtin.copy:
+        src: "{{ trading_src_dir }}/deploy/backtest-api.container"
+        dest: "{{ quadlet_dir }}/backtest-api.container"
+        remote_src: true
+        mode: "0644"
+      notify: Reload and restart backtest-api
+
+  handlers:
+    - name: Reload user systemd daemon
+      ansible.builtin.command:
+        cmd: systemctl --user daemon-reload
+      environment:
+        XDG_RUNTIME_DIR: /run/user/1001
+      listen: Reload and restart backtest-api
+
+    - name: Restart backtest-api service
+      ansible.builtin.command:
+        cmd: systemctl --user restart backtest-api
+      environment:
+        XDG_RUNTIME_DIR: /run/user/1001
+      changed_when: true
+      listen: Reload and restart backtest-api
