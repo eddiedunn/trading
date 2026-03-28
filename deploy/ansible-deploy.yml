@@ -16,19 +16,23 @@
     service_name: backtest-api
     quadlet_dir: /home/eddie/.config/containers/systemd
     trading_src_dir: "{{ ansible_env.HOME }}/trading"
+    trading_data_dir: /opt/trading
 
   tasks:
     - name: Ensure data directories exist
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
+        owner: eddie
+        group: eddie
         mode: "0755"
       loop:
-        - /opt/trading/data
-        - /opt/trading/strategies
-        - /opt/trading/strategies/candidates
-        - /opt/trading/backtest_results
-        - /opt/trading/logs
+        - "{{ trading_data_dir }}/data"
+        - "{{ trading_data_dir }}/strategies"
+        - "{{ trading_data_dir }}/strategies/candidates"
+        - "{{ trading_data_dir }}/backtest_results"
+        - "{{ trading_data_dir }}/logs"
+      become: true
 
     - name: Build container image from source
       ansible.builtin.command:
