@@ -25,5 +25,3 @@ __pycache__/
 # Backtest results (generated, not committed)
 backtest_results/
 
-# uv
-uv.lock
