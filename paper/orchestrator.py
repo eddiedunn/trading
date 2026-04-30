@@ -11,6 +11,10 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+# Host view of the source tree, used when constructing podman -v mounts.
+# When the monitor itself runs inside a container, set TRADING_HOST_REPO_ROOT
+# to the host's path so the bind-mounted podman socket resolves correctly.
+_HOST_REPO_ROOT = Path(os.environ.get("TRADING_HOST_REPO_ROOT", str(_REPO_ROOT)))
 
 BASE_PORT = 8090  # 8090, 8091, 8092 ... per candidate
 MAX_SLOTS = 6
@@ -44,10 +48,11 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
     config_path = PAPER_CONFIGS_DIR / f"{container_name}.json"
     config_path.write_text(json.dumps(config, indent=2))
 
-    strategies_dir = str(_REPO_ROOT / "strategies")
-    data_dir = str(_REPO_ROOT / "data")
-    strategy_logs_dir = _REPO_ROOT / "logs" / strategy_name
-    strategy_logs_dir.mkdir(parents=True, exist_ok=True)
+    strategies_dir = str(_HOST_REPO_ROOT / "strategies")
+    data_dir = str(_HOST_REPO_ROOT / "data")
+    host_configs_dir = str(_HOST_REPO_ROOT / "paper" / "configs")
+    (_REPO_ROOT / "logs" / strategy_name).mkdir(parents=True, exist_ok=True)
+    host_logs_dir = str(_HOST_REPO_ROOT / "logs" / strategy_name)
 
     subprocess.run(
         [
@@ -55,8 +60,8 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
             "--name", container_name,
             "-v", f"{strategies_dir}:/freqtrade/strategies:ro,Z",
             "-v", f"{data_dir}:/freqtrade/user_data/data:ro,Z",
-            "-v", f"{str(PAPER_CONFIGS_DIR)}:/freqtrade/config:ro,Z",
-            "-v", f"{str(strategy_logs_dir)}:/freqtrade/logs:Z",
+            "-v", f"{host_configs_dir}:/freqtrade/config:ro,Z",
+            "-v", f"{host_logs_dir}:/freqtrade/logs:Z",
             "-p", f"127.0.0.1:{port}:{port}",
             "freqtradeorg/freqtrade:stable",
             "trade",
