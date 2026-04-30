@@ -5,6 +5,7 @@ and isolated config. Port range: 8090-8095 (6 slots max on trinity).
 """
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -45,7 +46,8 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
 
     strategies_dir = str(_REPO_ROOT / "strategies")
     data_dir = str(_REPO_ROOT / "data")
-    logs_dir = str(_REPO_ROOT / "logs")
+    strategy_logs_dir = _REPO_ROOT / "logs" / strategy_name
+    strategy_logs_dir.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(
         [
@@ -54,12 +56,13 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
             "-v", f"{strategies_dir}:/freqtrade/strategies:ro,Z",
             "-v", f"{data_dir}:/freqtrade/user_data/data:ro,Z",
             "-v", f"{str(PAPER_CONFIGS_DIR)}:/freqtrade/config:ro,Z",
-            "-v", f"{logs_dir}:/freqtrade/logs:Z",
+            "-v", f"{str(strategy_logs_dir)}:/freqtrade/logs:Z",
             "-p", f"127.0.0.1:{port}:{port}",
             "freqtradeorg/freqtrade:stable",
             "trade",
             "--config", f"/freqtrade/config/{container_name}.json",
             "--strategy", strategy_name,
+            "--logfile", "/freqtrade/logs/freqtrade.log",
         ],
         check=True,
         capture_output=True,
@@ -126,8 +129,8 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
             "enabled": True,
             "listen_ip_address": "0.0.0.0",
             "listen_port": port,
-            "username": "freqtrade",
-            "password": "changeme",
+            "username": os.environ.get("FREQTRADE_API_USER", "freqtrade"),
+            "password": os.environ["FREQTRADE_API_PASSWORD"],
             "jwt_secret_key": "generate-a-real-secret-here",
         },
     }

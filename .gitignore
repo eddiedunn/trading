@@ -3,7 +3,8 @@ data/*.feather
 data/*.parquet
 
 # Logs
-logs/
+logs/*
+!logs/.gitkeep
 
 # Python
 __pycache__/

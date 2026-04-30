@@ -28,7 +28,7 @@ PROMOTION_CRITERIA = {
 def collect_metrics(instance: PaperInstance) -> dict:
     """Collect current metrics from a paper instance's REST API."""
     base = f"http://localhost:{instance.port}"
-    auth = ("freqtrade", "changeme")
+    auth = (os.environ.get("FREQTRADE_API_USER", "freqtrade"), os.environ["FREQTRADE_API_PASSWORD"])
 
     with httpx.Client(auth=auth, timeout=30) as client:
         profit = client.get(f"{base}/api/v1/profit").json()
