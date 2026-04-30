@@ -2,7 +2,7 @@
 
 Autonomous agent-driven perpetual futures trading on Hyperliquid. Four-phase pipeline: numpy fast filter, Freqtrade walk-forward, paper arena, live bot.
 
-**Design doc:** See `claw-deploy/docs/hyperliquid-agent-trading-stack.md` for full architecture.
+**Design doc:** See `starblue-infra/docs/services/trading-stack.md` for full architecture.
 
 ## Quick Start
 
@@ -22,9 +22,19 @@ uv run pytest
 
 ## Deployment
 
-This repo is cloned to both hosts by Ansible:
-- **tela:** backtest API service (starblue-infra `roles/backtest_api/`)
-- **trinity:** paper arena, live bot, Postgres (claw-deploy `roles/trading/`)
+All deployment is owned by **starblue-infra**. From that repo:
+
+```bash
+ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_backtest_api.yml         # tela
+ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_postgres.yml     # trinity
+ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_paper_arena.yml  # trinity
+ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_live.yml         # trinity
+```
+
+- **tela:** `backtest_api` service (FastAPI on `127.0.0.1:8070`).
+- **trinity:** `trading_postgres` (5432), `trading_paper_arena` (monitor + dynamic 8090–8095), `trading_live` (Freqtrade on 8080).
+
+Secrets (gopass): `trading/postgres-password`, `trading/freqtrade-api-password`, `trading/hyperliquid-private-key`, `trading/hyperliquid-wallet-address`.
 
 ## Structure
 
