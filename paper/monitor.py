@@ -92,6 +92,12 @@ def run_paper_arena(
 
         time.sleep(POLL_INTERVAL_SECS)
 
+    if best and meets_promotion_criteria(best):
+        print(
+            f"PROMOTION CANDIDATE: {best['strategy']} — "
+            f"run `python -m live.trading_client promote --strategy {best['strategy']}` to activate"
+        )
+
     return best
 
 

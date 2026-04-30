@@ -32,8 +32,21 @@ This repo is cloned to both hosts by Ansible:
 backtest_api/     Phase 1 numpy fast filter + Phase 2 Freqtrade walk-forward
 scripts/          OHLCV data collection (daily cron)
 paper/            Paper arena orchestrator + monitor
+live/             Live promotion CLI (trading_client)
 sql/              Postgres schema
 strategies/       Agent-written strategies (candidates/)
 config/           Freqtrade config templates
 tests/            Unit tests
 ```
+
+## Live Promotion Workflow
+
+Promotion from paper to live is **manual** — `paper/monitor.py` only logs a candidate; an operator must review and run the CLI.
+
+1. `paper/monitor.py` finishes its 14-day window and logs `PROMOTION CANDIDATE: <name> — run ...`.
+2. Operator inspects `paper_snapshots` and the candidate strategy code.
+3. Promote: `python -m live.trading_client promote --strategy <name>` — copies the strategy into the live slot, writes `/opt/trading/live/active_strategy.txt`, and sets `promoted_live=true` / `promoted_at=now()` in `strategy_registry`. Restart the live bot to pick up the new strategy.
+4. `python -m live.trading_client status` — show currently promoted strategy + timestamp.
+5. `python -m live.trading_client retire --strategy <name>` — mark retired in registry; live reverts to `NullStrategy` on next restart.
+
+Requires `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` in env.
