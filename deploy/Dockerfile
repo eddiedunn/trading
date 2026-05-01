@@ -8,7 +8,7 @@ RUN pip install uv
 
 WORKDIR /app
 
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock README.md ./
 COPY backtest_api/ backtest_api/
 COPY paper/ paper/
 COPY scripts/ scripts/

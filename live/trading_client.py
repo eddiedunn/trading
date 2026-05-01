@@ -9,7 +9,6 @@ import psycopg2
 
 LIVE_DIR = Path("/opt/trading/live")
 ACTIVE_FILE = LIVE_DIR / "active_strategy.txt"
-LIVE_SLOT = LIVE_DIR / "strategy.py"
 STRATEGIES_DIR = Path("/opt/trading/strategies")
 NULL_STRATEGY = "NullStrategy"
 
@@ -33,7 +32,9 @@ def _copy_strategy(name: str):
     if not src.exists():
         src = STRATEGIES_DIR / "candidates" / f"{name}.py"
     LIVE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, LIVE_SLOT)
+    for stale in LIVE_DIR.glob("*.py"):
+        stale.unlink()
+    shutil.copy2(src, LIVE_DIR / f"{name}.py")
 
 
 def promote(name: str):
@@ -53,7 +54,7 @@ def promote(name: str):
         conn.commit()
     finally:
         conn.close()
-    print(f"Promoted {name} to live slot ({LIVE_SLOT}); active_strategy.txt updated.")
+    print(f"Promoted {name} to live slot ({LIVE_DIR / f'{name}.py'}); active_strategy.txt updated.")
 
 
 def retire(name: str):

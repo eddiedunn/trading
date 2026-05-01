@@ -1,0 +1,485 @@
+"""Unit tests for live promotion CLI.
+
+Tests the three main subcommands: promote, status, retire.
+Each covers file operations, database interactions, and CLI argument parsing.
+"""
+
+import os
+from pathlib import Path
+from unittest.mock import patch, MagicMock, call
+
+import pytest
+
+from live.trading_client import (
+    promote,
+    status,
+    retire,
+    main,
+    _connect,
+    _write_active,
+    _copy_strategy,
+    LIVE_DIR,
+    ACTIVE_FILE,
+    STRATEGIES_DIR,
+    NULL_STRATEGY,
+)
+
+
+class TestConnect:
+    """Test database connection setup."""
+
+    @patch.dict(
+        os.environ,
+        {
+            "POSTGRES_HOST": "localhost",
+            "POSTGRES_DB": "trading",
+            "POSTGRES_USER": "user",
+            "POSTGRES_PASSWORD": "pass",
+        },
+    )
+    @patch("live.trading_client.psycopg2.connect")
+    def test_connect_uses_env_vars(self, mock_connect):
+        """Verify psycopg2.connect is called with env var credentials."""
+        mock_conn = MagicMock()
+        mock_connect.return_value = mock_conn
+
+        result = _connect()
+
+        assert result == mock_conn
+        mock_connect.assert_called_once_with(
+            host="localhost",
+            dbname="trading",
+            user="user",
+            password="pass",
+        )
+
+
+class TestWriteActive:
+    """Test active_strategy.txt file writing."""
+
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_write_active_creates_directory(self, mock_active_file, mock_live_dir):
+        """Verify LIVE_DIR is created with parents=True, exist_ok=True."""
+        _write_active("TestStrat")
+
+        mock_live_dir.mkdir.assert_called_once_with(parents=True, exist_ok=True)
+
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_write_active_writes_name_with_newline(self, mock_active_file, mock_live_dir):
+        """Verify file content is 'name\\n'."""
+        _write_active("MyStrategy")
+
+        mock_live_dir.mkdir.assert_called_once_with(parents=True, exist_ok=True)
+        mock_active_file.write_text.assert_called_once_with("MyStrategy\n")
+
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_write_active_null_strategy(self, mock_active_file, mock_live_dir):
+        """Verify NullStrategy can be written."""
+        _write_active(NULL_STRATEGY)
+
+        mock_active_file.write_text.assert_called_once_with("NullStrategy\n")
+
+
+class TestCopyStrategy:
+    """Test strategy file copying."""
+
+    @patch("live.trading_client.shutil.copy2")
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.STRATEGIES_DIR")
+    def test_copy_from_strategies_dir(self, mock_strat_dir, mock_live_dir, mock_copy):
+        """Copy strategy from strategies/<name>.py when it exists."""
+        mock_src = MagicMock()
+        mock_src.exists.return_value = True
+        mock_strat_dir.__truediv__.return_value = mock_src
+        mock_dest = MagicMock()
+        mock_live_dir.__truediv__.return_value = mock_dest
+        mock_live_dir.glob.return_value = []
+
+        _copy_strategy("TestStrat")
+
+        mock_live_dir.mkdir.assert_called_once_with(parents=True, exist_ok=True)
+        mock_live_dir.__truediv__.assert_called_with("TestStrat.py")
+        mock_copy.assert_called_once_with(mock_src, mock_dest)
+
+    @patch("live.trading_client.shutil.copy2")
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.STRATEGIES_DIR")
+    def test_copy_from_candidates_fallback(self, mock_strat_dir, mock_live_dir, mock_copy):
+        """Fall back to candidates/ when strategies/<name>.py not found."""
+        mock_src1 = MagicMock()
+        mock_src1.exists.return_value = False
+        mock_candidates = MagicMock()
+        mock_src2 = MagicMock()
+        mock_candidates.__truediv__.return_value = mock_src2
+        mock_src2.exists.return_value = True
+        mock_strat_dir.__truediv__.side_effect = [mock_src1, mock_candidates]
+        mock_live_dir.glob.return_value = []
+
+        _copy_strategy("TestStrat")
+
+        # First positional arg of copy2 is the candidates source
+        assert mock_copy.call_args[0][0] is mock_src2
+
+    @patch("live.trading_client.shutil.copy2")
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.STRATEGIES_DIR")
+    def test_copy_cleans_stale_py_files(self, mock_strat_dir, mock_live_dir, mock_copy):
+        """Stale .py files in LIVE_DIR are removed before copy."""
+        mock_src = MagicMock()
+        mock_src.exists.return_value = True
+        mock_strat_dir.__truediv__.return_value = mock_src
+        stale1, stale2 = MagicMock(), MagicMock()
+        mock_live_dir.glob.return_value = [stale1, stale2]
+
+        _copy_strategy("TestStrat")
+
+        stale1.unlink.assert_called_once()
+        stale2.unlink.assert_called_once()
+        mock_live_dir.glob.assert_called_once_with("*.py")
+
+    @patch("live.trading_client.shutil.copy2")
+    @patch("live.trading_client.LIVE_DIR")
+    @patch("live.trading_client.STRATEGIES_DIR")
+    def test_copy_fails_when_file_not_found(self, mock_strat_dir, mock_live_dir, mock_copy):
+        """shutil.copy2 raises when neither source exists."""
+        mock_src1 = MagicMock()
+        mock_src1.exists.return_value = False
+        mock_candidates = MagicMock()
+        mock_src2 = MagicMock()
+        mock_candidates.__truediv__.return_value = mock_src2
+        mock_src2.exists.return_value = False
+        mock_strat_dir.__truediv__.side_effect = [mock_src1, mock_candidates]
+        mock_live_dir.glob.return_value = []
+        mock_copy.side_effect = FileNotFoundError("file not found")
+
+        with pytest.raises(FileNotFoundError):
+            _copy_strategy("NonExistent")
+
+
+class TestPromote:
+    """Test the promote subcommand."""
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_copies_writes_updates_db(
+        self, mock_copy, mock_write, mock_connect
+    ):
+        """Full promote flow: copy file, write active, update DB."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        promote("TestStrat")
+
+        # Verify sequence
+        mock_copy.assert_called_once_with("TestStrat")
+        mock_write.assert_called_once_with("TestStrat")
+        mock_cursor.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_sql_shape(self, mock_copy, mock_write, mock_connect):
+        """Verify UPDATE statement has correct WHERE and SET clauses."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        promote("TestStrat")
+
+        # Check SQL statement
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "UPDATE strategy_registry" in sql
+        assert "promoted_live = TRUE" in sql
+        assert "promoted_at = NOW()" in sql
+        assert "WHERE name = %s" in sql
+        assert params == ("TestStrat",)
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_closes_connection_on_success(
+        self, mock_copy, mock_write, mock_connect
+    ):
+        """Verify connection is closed after successful promote."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        promote("TestStrat")
+
+        mock_conn.close.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_closes_connection_on_error(
+        self, mock_copy, mock_write, mock_connect
+    ):
+        """Verify connection is closed even if DB error occurs."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.execute.side_effect = Exception("DB error")
+
+        with pytest.raises(Exception):
+            promote("TestStrat")
+
+        mock_conn.close.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_prints_success_message(
+        self, mock_copy, mock_write, mock_connect, capsys
+    ):
+        """Verify success message is printed."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        promote("TestStrat")
+
+        captured = capsys.readouterr()
+        assert "Promoted TestStrat to live slot" in captured.out
+        assert "active_strategy.txt updated" in captured.out
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    @patch("live.trading_client._copy_strategy")
+    def test_promote_with_candidates_fallback(
+        self, mock_copy, mock_write, mock_connect, capsys
+    ):
+        """Promote works even if strategy is in candidates/ fallback."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        promote("CandidateStrat")
+
+        mock_copy.assert_called_once_with("CandidateStrat")
+        mock_write.assert_called_once_with("CandidateStrat")
+
+        captured = capsys.readouterr()
+        assert "Promoted CandidateStrat" in captured.out
+
+
+class TestStatus:
+    """Test the status subcommand."""
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_status_reads_db_and_file(
+        self, mock_active_file, mock_connect, capsys
+    ):
+        """Read promoted strategy from DB and active file content."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ("TestStrat", "2024-01-01 10:00:00")
+        mock_active_file.exists.return_value = True
+        mock_active_file.read_text.return_value = "TestStrat"
+
+        status()
+
+        # Verify DB query
+        sql = mock_cursor.execute.call_args[0][0]
+        assert "SELECT name, promoted_at" in sql
+        assert "FROM strategy_registry" in sql
+        assert "WHERE promoted_live = TRUE" in sql
+        assert "ORDER BY promoted_at DESC" in sql
+        assert "LIMIT 1" in sql
+
+        # Verify output
+        captured = capsys.readouterr()
+        assert "active_strategy.txt: TestStrat" in captured.out
+        assert "registry promoted:   TestStrat at 2024-01-01 10:00:00" in captured.out
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_status_when_active_file_missing(
+        self, mock_active_file, mock_connect, capsys
+    ):
+        """Show NullStrategy when active_strategy.txt doesn't exist."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = ("TestStrat", "2024-01-01 10:00:00")
+        mock_active_file.exists.return_value = False
+
+        status()
+
+        captured = capsys.readouterr()
+        assert "active_strategy.txt: NullStrategy" in captured.out
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_status_when_no_promoted(
+        self, mock_active_file, mock_connect, capsys
+    ):
+        """Show 'none' when no promoted strategy in registry."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = None
+        mock_active_file.exists.return_value = False
+
+        status()
+
+        captured = capsys.readouterr()
+        assert "active_strategy.txt: NullStrategy" in captured.out
+        assert "registry promoted:   none" in captured.out
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client.ACTIVE_FILE")
+    def test_status_closes_connection(
+        self, mock_active_file, mock_connect
+    ):
+        """Verify connection is closed after status."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = None
+        mock_active_file.exists.return_value = False
+
+        status()
+
+        mock_conn.close.assert_called_once()
+
+
+class TestRetire:
+    """Test the retire subcommand."""
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    def test_retire_writes_null_and_updates_db(self, mock_write, mock_connect):
+        """Full retire flow: write NullStrategy, update DB."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        retire("TestStrat")
+
+        # Verify sequence
+        mock_write.assert_called_once_with(NULL_STRATEGY)
+        mock_cursor.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    def test_retire_sql_shape(self, mock_write, mock_connect):
+        """Verify UPDATE sets retired_at=NOW() and promoted_live=FALSE."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        retire("TestStrat")
+
+        sql, params = mock_cursor.execute.call_args[0]
+        assert "UPDATE strategy_registry" in sql
+        assert "retired_at = NOW()" in sql
+        assert "promoted_live = FALSE" in sql
+        assert "WHERE name = %s" in sql
+        assert params == ("TestStrat",)
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    def test_retire_closes_connection(self, mock_write, mock_connect):
+        """Verify connection is closed after retire."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        retire("TestStrat")
+
+        mock_conn.close.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    def test_retire_prints_success_message(self, mock_write, mock_connect, capsys):
+        """Verify success message is printed."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        retire("TestStrat")
+
+        captured = capsys.readouterr()
+        assert "Retired TestStrat" in captured.out
+        assert f"live reverted to {NULL_STRATEGY}" in captured.out
+
+    @patch("live.trading_client._connect")
+    @patch("live.trading_client._write_active")
+    def test_retire_closes_on_error(self, mock_write, mock_connect):
+        """Verify connection is closed even if error occurs."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.execute.side_effect = Exception("DB error")
+
+        with pytest.raises(Exception):
+            retire("TestStrat")
+
+        mock_conn.close.assert_called_once()
+
+
+class TestMainCLI:
+    """Test argparse wiring for main()."""
+
+    @patch("live.trading_client.promote")
+    def test_promote_subcommand(self, mock_promote):
+        """Test promote subcommand invocation."""
+        with patch("sys.argv", ["trading_client", "promote", "--strategy", "MyStrat"]):
+            main()
+
+        mock_promote.assert_called_once_with("MyStrat")
+
+    @patch("live.trading_client.status")
+    def test_status_subcommand(self, mock_status):
+        """Test status subcommand invocation."""
+        with patch("sys.argv", ["trading_client", "status"]):
+            main()
+
+        mock_status.assert_called_once()
+
+    @patch("live.trading_client.retire")
+    def test_retire_subcommand(self, mock_retire):
+        """Test retire subcommand invocation."""
+        with patch("sys.argv", ["trading_client", "retire", "--strategy", "MyStrat"]):
+            main()
+
+        mock_retire.assert_called_once_with("MyStrat")
+
+    def test_promote_requires_strategy(self):
+        """Test promote requires --strategy argument."""
+        with patch("sys.argv", ["trading_client", "promote"]):
+            with pytest.raises(SystemExit):
+                main()
+
+    def test_retire_requires_strategy(self):
+        """Test retire requires --strategy argument."""
+        with patch("sys.argv", ["trading_client", "retire"]):
+            with pytest.raises(SystemExit):
+                main()
