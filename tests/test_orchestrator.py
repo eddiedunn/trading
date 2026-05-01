@@ -91,6 +91,24 @@ class TestBuildPaperConfig:
         assert cfg["margin_mode"] == "isolated"
         assert cfg["stake_currency"] == "USDC"
 
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"}, clear=True)
+    def test_config_prod_no_testnet_urls(self):
+        """Without TRADING_ENV=testnet, no API URL override is set."""
+        os.environ["FREQTRADE_API_PASSWORD"] = "changeme"
+        cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
+        assert "urls" not in cfg["exchange"]["ccxt_config"]
+
+    @patch.dict(
+        os.environ,
+        {"FREQTRADE_API_PASSWORD": "changeme", "TRADING_ENV": "testnet"},
+    )
+    def test_config_testnet_overrides_api_url(self):
+        """TRADING_ENV=testnet routes to hyperliquid-testnet.xyz."""
+        cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
+        urls = cfg["exchange"]["ccxt_config"]["urls"]["api"]
+        assert "testnet" in urls["public"]
+        assert "testnet" in urls["private"]
+
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_stoploss(self):
         """Config has trailing stop loss settings."""

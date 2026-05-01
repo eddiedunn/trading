@@ -111,13 +111,21 @@ def list_paper_instances() -> list[str]:
     return [n for n in result.stdout.strip().splitlines() if n]
 
 
+_TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+
+
 def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
     """Build Freqtrade config for a paper instance."""
+    exchange: dict = {
+        "name": "hyperliquid",
+        "ccxt_config": {"options": {"defaultType": "swap"}},
+    }
+    if os.environ.get("TRADING_ENV") == "testnet":
+        exchange["ccxt_config"]["urls"] = {
+            "api": {"public": _TESTNET_API_URL, "private": _TESTNET_API_URL}
+        }
     return {
-        "exchange": {
-            "name": "hyperliquid",
-            "options": {"defaultType": "swap"},
-        },
+        "exchange": exchange,
         "trading_mode": "futures",
         "margin_mode": "isolated",
         "stake_currency": "USDC",
