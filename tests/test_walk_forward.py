@@ -5,6 +5,8 @@ result aggregation across 3 windows, and Freqtrade result parsing.
 """
 
 import json
+import zipfile
+from datetime import date
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -17,8 +19,18 @@ from backtest_api.walk_forward import (
     _extract_max_drawdown,
     MIN_PROFIT_FACTOR,
     MAX_DRAWDOWN,
-    WINDOWS,
+    default_windows,
 )
+
+
+def _write_freqtrade_result(out_dir: Path, result_json: dict, stamp: str = "2026-10-02_21-17-10"):
+    """Lay out a result the way current Freqtrade does: a zip named in .last_result.json."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    name = f"backtest-result-{stamp}"
+    with zipfile.ZipFile(out_dir / f"{name}.zip", "w") as zf:
+        zf.writestr(f"{name}.json", json.dumps(result_json))
+        zf.writestr(f"{name}_config.json", "{}")
+    (out_dir / ".last_result.json").write_text(json.dumps({"latest_backtest": f"{name}.zip"}))
 
 
 class TestExtractMetrics:
@@ -63,6 +75,11 @@ class TestExtractMetrics:
         }
         assert _extract_max_drawdown(stats) == -0.25
 
+    def test_extract_max_drawdown_account_is_negated(self):
+        """Current Freqtrade reports max_drawdown_account as a positive fraction."""
+        stats = {"strategy": {"MyStrat": {"max_drawdown": None, "max_drawdown_account": 0.67}}}
+        assert _extract_max_drawdown(stats) == -0.67
+
     def test_extract_max_drawdown_direct(self):
         """Extract max drawdown from direct key (fallback)."""
         stats = {"max_drawdown": -0.15}
@@ -82,26 +99,25 @@ class TestExtractMetrics:
 class TestRunFreqtradeBacktest:
     """Test single backtest execution and result parsing."""
 
+    @pytest.fixture(autouse=True)
+    def _results_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRADING_RESULTS_DIR", str(tmp_path / "results"))
+        self.results = tmp_path / "results"
+
     @patch("backtest_api.walk_forward.subprocess.run")
-    @patch("builtins.open", create=True)
-    def test_successful_backtest(self, mock_open, mock_subprocess):
-        """Successful backtest run returns parsed JSON."""
-        # Mock subprocess result
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stderr="", stdout=""
-        )
-
-        # Mock file system
+    def test_successful_backtest(self, mock_subprocess):
+        """Successful backtest run returns the JSON inside the latest result zip."""
         result_json = {
-            "strategy": {"TestStrat": {"profit_factor": 1.3, "max_drawdown": -0.18}}
+            "strategy": {"TestStrat": {"profit_factor": 1.3, "max_drawdown_account": 0.18}}
         }
-        mock_file = MagicMock()
-        mock_file.read_text.return_value = json.dumps(result_json)
-        mock_open.return_value.__enter__.return_value = mock_file
 
-        with patch("pathlib.Path.exists", return_value=True):
-            with patch("pathlib.Path.read_text", return_value=json.dumps(result_json)):
-                result = run_freqtrade_backtest("TestStrat", "20230101-20240601")
+        def fake_run(cmd, **kwargs):
+            _write_freqtrade_result(self.results / "TestStrat" / "20230101-20240601", result_json)
+            return MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_subprocess.side_effect = fake_run
+
+        result = run_freqtrade_backtest("TestStrat", "20230101-20240601")
 
         assert result == result_json
 
@@ -126,32 +142,48 @@ class TestRunFreqtradeBacktest:
             returncode=0, stderr="", stdout=""
         )
 
-        with patch("pathlib.Path.exists", return_value=False):
-            result = run_freqtrade_backtest("TestStrat", "20230101-20240601")
+        result = run_freqtrade_backtest("TestStrat", "20230101-20240601")
 
         assert result is None
 
     @patch("backtest_api.walk_forward.subprocess.run")
-    def test_subprocess_called_with_correct_args(self, mock_subprocess):
-        """Verify subprocess command format."""
+    def test_subprocess_called_with_correct_args(self, mock_subprocess, monkeypatch):
+        """Verify subprocess command format and env-driven mounts."""
+        monkeypatch.setenv("TRADING_STRATEGIES_DIR", "/data/strategies")
+        monkeypatch.setenv("TRADING_FT_DATA_DIR", "/data/ftdata")
         mock_subprocess.return_value = MagicMock(
             returncode=0, stderr="", stdout=""
         )
 
-        with patch("pathlib.Path.exists", return_value=False):
-            run_freqtrade_backtest("MyStrat", "20230101-20240601")
+        run_freqtrade_backtest("MyStrat", "20230101-20240601")
 
-        # Check that podman run was called
         call_args = mock_subprocess.call_args[0][0]
         assert call_args[0] == "podman"
         assert call_args[1] == "run"
         assert "--rm" in call_args
-        assert "freqtradeorg/freqtrade:stable" in call_args
+        assert "--userns=keep-id:uid=1000,gid=1000" in call_args
+        assert "docker.io/freqtradeorg/freqtrade:stable" in call_args
         assert "backtesting" in call_args
-        assert "--strategy" in call_args
         assert "MyStrat" in call_args
-        assert "--timerange" in call_args
+        assert call_args[call_args.index("--strategy-path") + 1] == "/freqtrade/strategies"
+        assert "/data/strategies:/freqtrade/strategies:ro,Z" in call_args
+        assert "/data/ftdata:/freqtrade/user_data/data:ro,Z" in call_args
         assert "20230101-20240601" in call_args
+
+
+class TestDefaultWindows:
+    """Windows are anchored to today because Hyperliquid history is short."""
+
+    def test_windows_are_contiguous_and_end_today(self):
+        windows = default_windows(date(2026, 10, 2))
+        assert [w[2] for w in windows] == ["in-sample", "validation", "out-of-sample"]
+        assert windows[-1][1] == "20261002"
+        assert windows[0][1] == windows[1][0]
+        assert windows[1][1] == windows[2][0]
+
+    def test_windows_stay_inside_kept_history(self):
+        """History is kept from 2023-12; the in-sample window must not start before it."""
+        assert default_windows(date(2026, 10, 2))[0][0] >= "20231216"
 
 
 class TestWalkForwardWindow:
@@ -240,7 +272,7 @@ class TestWalkForwardWindow:
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
     def test_window_labels_and_timeranges(self, mock_backtest):
-        """Verify window labels and timeranges match WINDOWS constant."""
+        """Verify window labels and timeranges match default_windows()."""
         results = [
             {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
             {"strategy": {"S": {"profit_factor": 1.25, "max_drawdown": -0.18}}},
@@ -250,7 +282,7 @@ class TestWalkForwardWindow:
 
         outcome = walk_forward_test("TestStrat")
 
-        for i, (start, end, label) in enumerate(WINDOWS):
+        for i, (start, end, label) in enumerate(default_windows()):
             assert outcome["windows"][i]["label"] == label
             assert outcome["windows"][i]["timerange"] == f"{start}-{end}"
 

@@ -1,0 +1,86 @@
+---
+# trading_paper_arena role
+#
+# Phase 3 of the Hyperliquid trading pipeline. Deploys the paper-arena monitor
+# (python -m paper.monitor) as a long-running rootless-podman user service. The
+# orchestrator inside it starts and stops sibling Freqtrade dry-run containers
+# through the bind-mounted podman socket, so there is no Quadlet per slot.
+
+- name: Assert Freqtrade API password is set
+  ansible.builtin.assert:
+    that:
+      - freqtrade_api_password is defined
+      - freqtrade_api_password not in ['', 'changeme']
+    fail_msg: >-
+      freqtrade_api_password is unset or set to the placeholder 'changeme'.
+      Populate it via: gopass insert {{ _trading_gopass_prefix }}/freqtrade-api-password
+
+- name: Create paper-arena directories
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  loop:
+    - "{{ paper_arena_dir | dirname }}"
+    - "{{ paper_arena_dir }}"
+    - "{{ paper_arena_dir }}/strategies"
+    - "{{ paper_arena_dir }}/configs"
+    - "{{ paper_arena_dir }}/logs"
+
+- name: Enable user linger for {{ ansible_user }}
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_user }}"
+  changed_when: false
+
+- name: Enable the rootless podman socket (the monitor starts Freqtrade through it)
+  ansible.builtin.systemd_service:
+    name: podman.socket
+    scope: user
+    enabled: true
+    state: started
+
+- name: Sync trading source code to trinity
+  ansible.posix.synchronize:
+    src: "{{ trading_repo_local }}/"
+    dest: "{{ trading_repo_remote }}/"
+    delete: true
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.venv"
+      - "--exclude=*.pyc"
+      - "--exclude=/data/"
+      - "--exclude=/logs/"
+      - "--exclude=/backtest_results/"
+      - "--exclude=/paper/run/"
+      - "--chmod=Du+rwx,go+rx,Fu+rw,go+r"
+
+- name: Build paper-arena monitor container image
+  containers.podman.podman_image:
+    name: "{{ paper_arena_image }}"
+    path: "{{ trading_repo_remote }}"
+    build:
+      file: deploy/Dockerfile.paper
+    state: build
+    force: true
+
+- name: Pull current Freqtrade image (old ccxt cannot read Hyperliquid markets)
+  containers.podman.podman_image:
+    name: "{{ freqtrade_image }}"
+    force: true
+
+- name: Deploy paper-arena monitor Quadlet
+  ansible.builtin.template:
+    src: paper-arena-monitor.container.j2
+    dest: ~/.config/containers/systemd/paper-arena-monitor.container
+    mode: '0600'  # holds the database and API passwords
+
+- name: Restart paper-arena-monitor.service
+  ansible.builtin.systemd_service:
+    name: paper-arena-monitor.service
+    scope: user
+    daemon_reload: true
+    state: restarted

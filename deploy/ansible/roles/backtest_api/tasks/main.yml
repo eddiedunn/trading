@@ -1,0 +1,95 @@
+---
+- name: Create Backtest API directories
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  loop:
+    - "{{ backtest_api_root }}"
+    - "{{ backtest_api_data_dir }}"
+    - "{{ backtest_api_ft_data_dir }}"
+    - "{{ backtest_api_strategies_dir }}"
+    - "{{ backtest_api_results_dir }}"
+
+- name: Enable user linger for {{ ansible_user }}
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_user }}"
+  changed_when: false
+
+- name: Enable the rootless podman socket (Phase 2 starts Freqtrade through it)
+  ansible.builtin.systemd_service:
+    name: podman.socket
+    scope: user
+    enabled: true
+    state: started
+
+- name: Sync trading source code
+  ansible.posix.synchronize:
+    src: "{{ trading_repo_local }}/"
+    dest: "{{ trading_repo_remote }}/"
+    delete: true
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=.venv"
+      - "--exclude=*.pyc"
+      - "--exclude=/data/"
+      - "--exclude=/logs/"
+      - "--exclude=/backtest_results/"
+      - "--exclude=/paper/run/"
+      - "--chmod=Du+rwx,go+rx,Fu+rw,go+r"
+
+- name: Seed price history the exchange no longer serves (only if missing)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ backtest_api_data_dir }}/"
+    mode: '0644'
+    force: false
+  with_fileglob:
+    - "{{ trading_repo_local }}/data/*.feather"
+
+- name: Build Backtest API container image
+  containers.podman.podman_image:
+    name: "{{ backtest_api_image }}"
+    path: "{{ trading_repo_remote }}"
+    build:
+      file: deploy/Dockerfile
+    state: build
+    force: true
+  register: backtest_api_build
+
+- name: Pull current Freqtrade image (old ccxt cannot read Hyperliquid markets)
+  containers.podman.podman_image:
+    name: "{{ freqtrade_image }}"
+    force: true
+
+- name: Download candles and funding, export Freqtrade backtest files
+  ansible.builtin.command: >-
+    podman run --rm --network host
+    -v {{ backtest_api_data_dir }}:{{ backtest_api_data_dir }}:Z
+    -v {{ backtest_api_ft_data_dir }}:{{ backtest_api_ft_data_dir }}:Z
+    {{ backtest_api_image }}
+    python scripts/download_data.py
+    --timeframes 4h
+    --data-dir {{ backtest_api_data_dir }}
+    --freqtrade-dir {{ backtest_api_ft_data_dir }}
+    --since {{ backtest_api_history_since }}
+  register: backtest_api_download
+  changed_when: "' new)' in backtest_api_download.stdout"
+
+- name: Deploy Backtest API Quadlet
+  ansible.builtin.template:
+    src: backtest_api.container.j2
+    dest: ~/.config/containers/systemd/backtest-api.container
+    mode: '0644'
+  register: backtest_api_quadlet
+
+- name: Restart Backtest API service
+  ansible.builtin.systemd_service:
+    name: backtest-api.service
+    scope: user
+    daemon_reload: true
+    state: restarted

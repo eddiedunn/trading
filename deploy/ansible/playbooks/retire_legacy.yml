@@ -1,0 +1,64 @@
+---
+# One-off: stop the March 2026 deployment (from claw-deploy's trading role and
+# the old deploy/backtest-api.container) so the roles in this repo can take over
+# the same container names and ports. Quadlet files are moved, not deleted; the
+# postgres-trading volume, ~/trading on trinity and /opt/trading on tela are kept.
+- name: Retire legacy trading services on trinity
+  hosts: trinity
+  gather_facts: true
+  vars:
+    retired_dir: "~/.config/containers/systemd/retired-2026-10-02"
+  tasks:
+    - name: Stop legacy services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        scope: user
+        state: stopped
+      loop:
+        - freqtrade-live.service
+        - postgres-trading.service
+      failed_when: false
+
+    - name: Make retired folder
+      ansible.builtin.file:
+        path: "{{ retired_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Move legacy Quadlet files out of the generator path
+      ansible.builtin.command: "mv ~/.config/containers/systemd/{{ item }} {{ retired_dir }}/"
+      args:
+        removes: "~/.config/containers/systemd/{{ item }}"
+      loop:
+        - freqtrade-live.container
+        - postgres-trading.container
+        - postgres-trading.volume
+
+    - name: Reload user systemd
+      ansible.builtin.systemd_service:
+        scope: user
+        daemon_reload: true
+
+- name: Retire legacy backtest API on tela
+  hosts: tela
+  gather_facts: true
+  vars:
+    retired_dir: "~/.config/containers/systemd/retired-2026-10-02"
+  tasks:
+    - name: Stop legacy backtest-api.service
+      ansible.builtin.systemd_service:
+        name: backtest-api.service
+        scope: user
+        state: stopped
+      failed_when: false
+
+    - name: Make retired folder
+      ansible.builtin.file:
+        path: "{{ retired_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Keep a copy of the legacy Quadlet (the role writes a new one with the same name)
+      ansible.builtin.command: "cp ~/.config/containers/systemd/backtest-api.container {{ retired_dir }}/"
+      args:
+        creates: "{{ retired_dir }}/backtest-api.container"

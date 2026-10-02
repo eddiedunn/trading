@@ -1,0 +1,31 @@
+---
+# trading_live role defaults — the Phase 4 Freqtrade bot on trinity.
+#
+# NOTE: this role uses absolute /opt/trading paths (not home-relative) because
+# the trading_client CLI hard-codes /opt/trading/{live,strategies} when
+# promoting/retiring strategies.
+
+trading_live_dir: /opt/trading/live
+trading_live_userdir: /opt/trading
+trading_live_port: 8080
+
+# SAFETY: the bot trades with pretend money unless this is explicitly set to
+# false on the command line (-e trading_live_dry_run=false). In dry-run no
+# wallet key is looked up, written to disk, or given to Freqtrade.
+trading_live_dry_run: true
+trading_live_dry_run_wallet: 100
+
+_hyperliquid_api_url: "{{ 'https://api.hyperliquid-testnet.xyz' if trading_env == 'testnet' else '' }}"
+
+# Hyperliquid wallet — only read when trading_live_dry_run is false.
+hyperliquid_private_key: "{{ lookup('pipe', 'gopass show ' + _trading_gopass_prefix + '/hyperliquid-private-key 2>/dev/null || echo changeme') }}"
+hyperliquid_wallet_address: "{{ lookup('pipe', 'gopass show ' + _trading_gopass_prefix + '/hyperliquid-wallet-address 2>/dev/null || echo changeme') }}"
+
+# Trading parameters — keep in sync with config/backtest.json shape.
+trading_live_pairs:
+  - 'BTC/USDC:USDC'
+  - 'ETH/USDC:USDC'
+  - 'SOL/USDC:USDC'
+trading_live_stake_amount: 33
+trading_live_max_open_trades: 3
+trading_live_timeframe: 4h

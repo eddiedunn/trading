@@ -18,6 +18,7 @@ from live.trading_client import (
     _connect,
     _write_active,
     _copy_strategy,
+    paper_add,
     LIVE_DIR,
     ACTIVE_FILE,
     STRATEGIES_DIR,
@@ -144,7 +145,7 @@ class TestCopyStrategy:
     @patch("live.trading_client.LIVE_DIR")
     @patch("live.trading_client.STRATEGIES_DIR")
     def test_copy_fails_when_file_not_found(self, mock_strat_dir, mock_live_dir, mock_copy):
-        """shutil.copy2 raises when neither source exists."""
+        """Missing source raises before the live slot is touched."""
         mock_src1 = MagicMock()
         mock_src1.exists.return_value = False
         mock_candidates = MagicMock()
@@ -152,11 +153,14 @@ class TestCopyStrategy:
         mock_candidates.__truediv__.return_value = mock_src2
         mock_src2.exists.return_value = False
         mock_strat_dir.__truediv__.side_effect = [mock_src1, mock_candidates]
-        mock_live_dir.glob.return_value = []
-        mock_copy.side_effect = FileNotFoundError("file not found")
+        stale = MagicMock()
+        mock_live_dir.glob.return_value = [stale]
 
         with pytest.raises(FileNotFoundError):
             _copy_strategy("NonExistent")
+
+        stale.unlink.assert_not_called()
+        mock_copy.assert_not_called()
 
 
 class TestPromote:
@@ -483,3 +487,47 @@ class TestMainCLI:
         with patch("sys.argv", ["trading_client", "retire"]):
             with pytest.raises(SystemExit):
                 main()
+
+
+class TestPaperAdd:
+    """Test queueing a strategy for the paper arena."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TRADING_PAPER_DIR", str(tmp_path / "paper"))
+        self.code = tmp_path / "EmaCross.py"
+        self.code.write_text("# strategy")
+        self.paper = tmp_path / "paper"
+
+    @patch("live.trading_client._connect")
+    def test_queues_passing_strategy(self, mock_connect):
+        cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+
+        paper_add("EmaCross", self.code, {"passed": True}, {"passed": True})
+
+        assert (self.paper / "strategies" / "EmaCross.py").read_text() == "# strategy"
+        sql, params = cur.execute.call_args[0]
+        assert "INSERT INTO strategy_registry" in sql
+        assert "paper_queued_at" in sql
+        assert params[0] == "EmaCross"
+        assert params[1] is True and params[3] is True
+        assert params[5] is None
+        mock_connect.return_value.commit.assert_called_once()
+
+    @patch("live.trading_client._connect")
+    def test_refuses_failing_strategy_without_force(self, mock_connect):
+        with pytest.raises(SystemExit):
+            paper_add("EmaCross", self.code, {"passed": True}, {"passed": False})
+
+        mock_connect.assert_not_called()
+        assert not (self.paper / "strategies" / "EmaCross.py").exists()
+
+    @patch("live.trading_client._connect")
+    def test_force_queues_and_notes_it(self, mock_connect):
+        cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+
+        paper_add("EmaCross", self.code, {"passed": False}, {"passed": False}, force=True)
+
+        params = cur.execute.call_args[0][1]
+        assert params[1] is False and params[3] is False
+        assert params[5] == "queued with --force"

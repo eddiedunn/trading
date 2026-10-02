@@ -6,20 +6,35 @@ and isolated config. Port range: 8090-8095 (6 slots max on trinity).
 
 import json
 import os
+import secrets
 import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-# Host view of the source tree, used when constructing podman -v mounts.
-# When the monitor itself runs inside a container, set TRADING_HOST_REPO_ROOT
-# to the host's path so the bind-mounted podman socket resolves correctly.
-_HOST_REPO_ROOT = Path(os.environ.get("TRADING_HOST_REPO_ROOT", str(_REPO_ROOT)))
+
+FREQTRADE_IMAGE = "docker.io/freqtradeorg/freqtrade:stable"
 
 BASE_PORT = 8090  # 8090, 8091, 8092 ... per candidate
 MAX_SLOTS = 6
 
-PAPER_CONFIGS_DIR = _REPO_ROOT / "paper" / "configs"
+
+def paper_dir() -> Path:
+    """Root for candidate strategies, per-slot configs and logs.
+
+    When the monitor runs in a container, this directory is bind-mounted at the
+    same path it has on the host, so the paths passed to sibling Freqtrade
+    containers (spawned through the podman socket) resolve on the host.
+    """
+    return Path(os.environ.get("TRADING_PAPER_DIR", str(_REPO_ROOT / "paper" / "run")))
+
+
+def strategies_dir() -> Path:
+    return paper_dir() / "strategies"
+
+
+def configs_dir() -> Path:
+    return paper_dir() / "configs"
 
 
 @dataclass
@@ -44,29 +59,28 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
 
     # Write per-candidate config
     config = _build_paper_config(strategy_name, port, db_schema)
-    PAPER_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
-    config_path = PAPER_CONFIGS_DIR / f"{container_name}.json"
+    configs_dir().mkdir(parents=True, exist_ok=True)
+    config_path = configs_dir() / f"{container_name}.json"
     config_path.write_text(json.dumps(config, indent=2))
 
-    strategies_dir = str(_HOST_REPO_ROOT / "strategies")
-    data_dir = str(_HOST_REPO_ROOT / "data")
-    host_configs_dir = str(_HOST_REPO_ROOT / "paper" / "configs")
-    (_REPO_ROOT / "logs" / strategy_name).mkdir(parents=True, exist_ok=True)
-    host_logs_dir = str(_HOST_REPO_ROOT / "logs" / strategy_name)
+    logs_dir = paper_dir() / "logs" / strategy_name
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     subprocess.run(
         [
             "podman", "run", "-d",
             "--name", container_name,
-            "-v", f"{strategies_dir}:/freqtrade/strategies:ro,Z",
-            "-v", f"{data_dir}:/freqtrade/user_data/data:ro,Z",
-            "-v", f"{host_configs_dir}:/freqtrade/config:ro,Z",
-            "-v", f"{host_logs_dir}:/freqtrade/logs:Z",
+            # Run as the host user so logs and the trade DB stay host-owned.
+            "--userns=keep-id:uid=1000,gid=1000",
+            "-v", f"{strategies_dir()}:/freqtrade/strategies:ro,Z",
+            "-v", f"{configs_dir()}:/freqtrade/config:ro,Z",
+            "-v", f"{logs_dir}:/freqtrade/logs:Z",
             "-p", f"127.0.0.1:{port}:{port}",
-            "freqtradeorg/freqtrade:stable",
+            FREQTRADE_IMAGE,
             "trade",
             "--config", f"/freqtrade/config/{container_name}.json",
             "--strategy", strategy_name,
+            "--strategy-path", "/freqtrade/strategies",
             "--logfile", "/freqtrade/logs/freqtrade.log",
         ],
         check=True,
@@ -81,7 +95,7 @@ def teardown_paper_instance(instance: PaperInstance):
     """Stop and remove a paper trading container."""
     subprocess.run(["podman", "stop", instance.container_name], check=False, capture_output=True)
     subprocess.run(["podman", "rm", instance.container_name], check=False, capture_output=True)
-    config_path = PAPER_CONFIGS_DIR / f"{instance.container_name}.json"
+    config_path = configs_dir() / f"{instance.container_name}.json"
     config_path.unlink(missing_ok=True)
 
 
@@ -97,8 +111,8 @@ def teardown_all():
             subprocess.run(["podman", "rm", name], check=False, capture_output=True)
 
     # Clean up config files
-    if PAPER_CONFIGS_DIR.exists():
-        for f in PAPER_CONFIGS_DIR.glob("paper_*.json"):
+    if configs_dir().exists():
+        for f in configs_dir().glob("paper_*.json"):
             f.unlink(missing_ok=True)
 
 
@@ -113,12 +127,15 @@ def list_paper_instances() -> list[str]:
 
 _TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
 
+PAIRS = ["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"]
+
 
 def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
     """Build Freqtrade config for a paper instance."""
     exchange: dict = {
         "name": "hyperliquid",
         "ccxt_config": {"options": {"defaultType": "swap"}},
+        "pair_whitelist": PAIRS,
     }
     if os.environ.get("TRADING_ENV") == "testnet":
         exchange["ccxt_config"]["urls"] = {
@@ -132,9 +149,14 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
         "stake_amount": 33,
         "max_open_trades": 3,
         "timeframe": "4h",
-        "pair_whitelist": ["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"],
         "dry_run": True,
         "dry_run_wallet": 100,
+        "pairlists": [{"method": "StaticPairList"}],
+        "entry_pricing": {"price_side": "same"},
+        "exit_pricing": {"price_side": "same"},
+        # Keep the dry-run trade history next to the logs so it survives restarts.
+        "db_url": "sqlite:////freqtrade/logs/tradesv3.dryrun.sqlite",
+        "initial_state": "running",
         "stoploss": -0.05,
         "trailing_stop": True,
         "trailing_stop_positive": 0.02,
@@ -144,6 +166,6 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
             "listen_port": port,
             "username": os.environ.get("FREQTRADE_API_USER", "freqtrade"),
             "password": os.environ["FREQTRADE_API_PASSWORD"],
-            "jwt_secret_key": "generate-a-real-secret-here",
+            "jwt_secret_key": secrets.token_hex(32),
         },
     }

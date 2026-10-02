@@ -1,0 +1,10 @@
+---
+# Connection settings (port, db, user, password) live in group_vars/all.yml so
+# the paper arena and live roles share them.
+#
+# Port 5432: trinity's forgejo Postgres was moved to 5433 to leave it free.
+trading_postgres_image: docker.io/library/postgres:16
+trading_postgres_data_dir: /data/services/trading_postgres/data
+
+# Marker file gating the one-shot schema apply.
+trading_postgres_schema_marker: /data/services/trading_postgres/.schema-initialized

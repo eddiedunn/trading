@@ -139,7 +139,7 @@ class TestCollectMetrics:
                 "trade_count": 25,
                 "winrate": 0.48,
                 "profit_factor": 1.3,
-                "max_drawdown": -12.0,
+                "max_drawdown": 0.12,
             }),
             MagicMock(json=lambda: [
                 {"pair": "BTC/USDC:USDC"},
@@ -156,6 +156,25 @@ class TestCollectMetrics:
         assert metrics["profit_factor"] == 1.3
         assert metrics["max_drawdown"] == -12.0
         assert metrics["open_trades"] == 2
+
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
+    @patch("paper.monitor.httpx.Client")
+    def test_collect_metrics_null_profit_factor(self, mock_client_cls):
+        """A fresh instance reports profit_factor null; treat it as 0, not a crash."""
+        instance = PaperInstance("S", 8090, "paper_s_0", "paper_s")
+        mock_client = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value = mock_client
+        mock_client.get.side_effect = [
+            MagicMock(json=lambda: {"profit_all_percent": 0.0, "trade_count": 2,
+                                    "winrate": 0.0, "profit_factor": None, "max_drawdown": 0.0}),
+            MagicMock(json=lambda: []),
+        ]
+
+        metrics = collect_metrics(instance)
+
+        assert metrics["profit_factor"] == 0
+        assert metrics["max_drawdown"] == 0
+        assert meets_promotion_criteria(metrics) is False
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     @patch("paper.monitor.httpx.Client")
@@ -499,3 +518,88 @@ class TestRunPaperArena:
 
         # Should have looped twice, then exited on third time check
         assert mock_collect.call_count == 2
+
+
+class TestQueue:
+    """Test the strategy_registry queue the service loop reads."""
+
+    @patch("paper.monitor.psycopg2.connect")
+    def test_queued_strategies_selects_unstarted_oldest_first(self, mock_connect):
+        from paper.monitor import queued_strategies
+
+        cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchall.return_value = [("EmaCross",), ("Other",)]
+
+        assert queued_strategies("postgresql://x", limit=6) == ["EmaCross", "Other"]
+        sql, params = cur.execute.call_args[0]
+        assert "paper_queued_at IS NOT NULL" in sql
+        assert "paper_started_at IS NULL" in sql
+        assert "ORDER BY paper_queued_at" in sql
+        assert params == (6,)
+
+    @patch("paper.monitor.psycopg2.connect")
+    def test_requeue_interrupted_clears_unfinished_starts(self, mock_connect):
+        from paper.monitor import requeue_interrupted
+
+        cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        cur.description = None
+
+        requeue_interrupted("postgresql://x")
+
+        sql = cur.execute.call_args[0][0]
+        assert "SET paper_started_at = NULL" in sql
+        assert "paper_finished_at IS NULL" in sql
+
+    @patch.dict(os.environ, {"POSTGRES_USER": "u", "POSTGRES_PASSWORD": "p", "POSTGRES_DB": "d"})
+    def test_db_url_defaults_to_local_host(self):
+        from paper.monitor import db_url_from_env
+
+        assert db_url_from_env() == "postgresql://u:p@127.0.0.1:5432/d"
+
+
+class TestRunCohort:
+    """Test one paper cohort from spawn to recorded outcome."""
+
+    @patch("paper.monitor.teardown_paper_instance")
+    @patch("paper.monitor._record_result")
+    @patch("paper.monitor._mark_started")
+    @patch("paper.monitor.collect_metrics")
+    @patch("paper.monitor.run_paper_arena")
+    @patch("paper.monitor.wait_until_ready", return_value=True)
+    @patch("paper.monitor.spawn_paper_instance")
+    def test_records_each_outcome_and_tears_down(
+        self, mock_spawn, mock_ready, mock_arena, mock_collect, mock_started, mock_record, mock_teardown
+    ):
+        from paper.monitor import run_cohort
+
+        a = PaperInstance("Good", 8090, "paper_good_0", "paper_good")
+        b = PaperInstance("Bad", 8091, "paper_bad_1", "paper_bad")
+        mock_spawn.side_effect = [a, b]
+        good = {"trade_count": 30, "profit_pct": 10.0, "max_drawdown": -5.0, "win_rate": 0.5, "profit_factor": 1.5}
+        mock_collect.side_effect = [good, {**good, "profit_factor": 0.5}]
+
+        run_cohort("postgresql://x", ["Good", "Bad"], eval_days=14)
+
+        assert mock_spawn.call_args_list == [call("Good", 0), call("Bad", 1)]
+        mock_started.assert_called_once_with("postgresql://x", ["Good", "Bad"])
+        mock_arena.assert_called_once_with([a, b], eval_days=14, db_url="postgresql://x")
+        assert mock_record.call_args_list == [
+            call("postgresql://x", "Good", True),
+            call("postgresql://x", "Bad", False),
+        ]
+        assert mock_teardown.call_count == 2
+
+    @patch("paper.monitor.teardown_paper_instance")
+    @patch("paper.monitor._mark_started")
+    @patch("paper.monitor.run_paper_arena", side_effect=RuntimeError("boom"))
+    @patch("paper.monitor.wait_until_ready", return_value=True)
+    @patch("paper.monitor.spawn_paper_instance")
+    def test_tears_down_when_arena_fails(self, mock_spawn, mock_ready, mock_arena, mock_started, mock_teardown):
+        from paper.monitor import run_cohort
+
+        mock_spawn.return_value = PaperInstance("S", 8090, "paper_s_0", "paper_s")
+
+        with pytest.raises(RuntimeError):
+            run_cohort("postgresql://x", ["S"])
+
+        mock_teardown.assert_called_once()

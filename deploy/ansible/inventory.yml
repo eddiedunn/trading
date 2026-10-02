@@ -1,0 +1,23 @@
+---
+# The two home hosts the trading stack runs on.
+#
+#   tela    - backtest API (Phase 1 + 2)
+#   trinity - Postgres, paper arena (Phase 3), live bot (Phase 4)
+#
+# ansible_host defaults to the home LAN address (matches ~/.ssh/config).
+# Pass -e net_path=mesh to go over Tailscale instead.
+all:
+  vars:
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_become_method: sudo
+    ansible_host: "{{ tailscale_ip if net_path | default('lan') == 'mesh' else local_ip }}"
+  hosts:
+    tela:
+      ansible_user: eddie
+      local_ip: 192.168.11.253
+      tailscale_ip: 100.70.55.76
+    trinity:
+      ansible_user: tmwsiy
+      local_ip: 192.168.11.222
+      tailscale_ip: 100.71.152.64

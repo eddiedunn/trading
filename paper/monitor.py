@@ -2,16 +2,25 @@
 
 Polls Freqtrade REST APIs, writes snapshots to Postgres, evaluates
 promotion criteria after the evaluation window.
+
+Run as a service with ``python -m paper.monitor``: it picks up strategies
+queued with ``trading_client paper-add``, runs them as one cohort for the
+evaluation window, records the outcome, and waits for the next queue.
 """
 
 import os
 import time
-from typing import Any
 
 import httpx
 import psycopg2
 
-from paper.orchestrator import PaperInstance
+from paper.orchestrator import (
+    MAX_SLOTS,
+    PaperInstance,
+    spawn_paper_instance,
+    teardown_all,
+    teardown_paper_instance,
+)
 
 EVAL_WINDOW_DAYS = 14
 POLL_INTERVAL_SECS = 3600  # check every hour
@@ -36,11 +45,13 @@ def collect_metrics(instance: PaperInstance) -> dict:
 
     return {
         "strategy": instance.strategy_name,
-        "profit_pct": profit.get("profit_all_percent", 0),
-        "trade_count": profit.get("trade_count", 0),
-        "win_rate": profit.get("winrate", 0),
-        "profit_factor": profit.get("profit_factor", 0),
-        "max_drawdown": profit.get("max_drawdown", 0),
+        "profit_pct": profit.get("profit_all_percent") or 0,
+        "trade_count": profit.get("trade_count") or 0,
+        "win_rate": profit.get("winrate") or 0,
+        # Freqtrade returns null until there is a losing trade
+        "profit_factor": profit.get("profit_factor") or 0,
+        # Freqtrade reports a positive fraction (0.12); criteria use negative percent (-12.0)
+        "max_drawdown": -abs(profit.get("max_drawdown") or 0) * 100,
         "open_trades": len(status) if isinstance(status, list) else 0,
     }
 
@@ -119,3 +130,128 @@ def _write_metrics_snapshot(all_metrics: list[dict], db_url: str):
         conn.commit()
     finally:
         conn.close()
+
+
+STARTUP_TIMEOUT_SECS = 180
+IDLE_POLL_SECS = 300
+
+
+def db_url_from_env() -> str:
+    return "postgresql://{user}:{password}@{host}:{port}/{db}".format(
+        user=os.environ["POSTGRES_USER"],
+        password=os.environ["POSTGRES_PASSWORD"],
+        host=os.environ.get("POSTGRES_HOST", "127.0.0.1"),
+        port=os.environ.get("POSTGRES_PORT", "5432"),
+        db=os.environ["POSTGRES_DB"],
+    )
+
+
+def _execute(db_url: str, sql: str, params: tuple = ()) -> list[tuple]:
+    conn = psycopg2.connect(db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall() if cur.description else []
+        conn.commit()
+        return rows
+    finally:
+        conn.close()
+
+
+def queued_strategies(db_url: str, limit: int = MAX_SLOTS) -> list[str]:
+    """Strategies queued for paper trading that have not started yet, oldest first."""
+    rows = _execute(
+        db_url,
+        """
+        SELECT name FROM strategy_registry
+         WHERE paper_queued_at IS NOT NULL AND paper_started_at IS NULL
+         ORDER BY paper_queued_at
+         LIMIT %s
+        """,
+        (limit,),
+    )
+    return [r[0] for r in rows]
+
+
+def requeue_interrupted(db_url: str) -> None:
+    """A restart loses the running cohort; put its strategies back in the queue."""
+    _execute(
+        db_url,
+        """
+        UPDATE strategy_registry SET paper_started_at = NULL
+         WHERE paper_started_at IS NOT NULL AND paper_finished_at IS NULL
+        """,
+    )
+
+
+def _mark_started(db_url: str, names: list[str]) -> None:
+    _execute(
+        db_url,
+        "UPDATE strategy_registry SET paper_started_at = NOW() WHERE name = ANY(%s) AND paper_started_at IS NULL",
+        (names,),
+    )
+
+
+def _record_result(db_url: str, name: str, passed: bool) -> None:
+    _execute(
+        db_url,
+        """
+        UPDATE strategy_registry
+           SET paper_passed = %s, paper_finished_at = NOW()
+         WHERE name = %s AND paper_finished_at IS NULL
+        """,
+        (passed, name),
+    )
+
+
+def wait_until_ready(instance: PaperInstance, timeout: float = STARTUP_TIMEOUT_SECS) -> bool:
+    """Wait for a fresh Freqtrade container to answer /api/v1/ping."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = httpx.get(f"http://localhost:{instance.port}/api/v1/ping", timeout=5)
+            if r.status_code == 200:
+                return True
+        except httpx.HTTPError:
+            pass
+        time.sleep(5)
+    return False
+
+
+def run_cohort(db_url: str, names: list[str], eval_days: int = EVAL_WINDOW_DAYS) -> None:
+    """Paper-trade one cohort for the evaluation window and record each outcome."""
+    instances = [spawn_paper_instance(name, slot) for slot, name in enumerate(names)]
+    _mark_started(db_url, names)
+    try:
+        for inst in instances:
+            if not wait_until_ready(inst):
+                print(f"  Warning: {inst.container_name} did not answer /api/v1/ping in time")
+        run_paper_arena(instances, eval_days=eval_days, db_url=db_url)
+        for inst in instances:
+            try:
+                passed = meets_promotion_criteria(collect_metrics(inst))
+            except Exception as e:
+                print(f"  Warning: final metrics failed for {inst.strategy_name}: {e}")
+                passed = False
+            _record_result(db_url, inst.strategy_name, passed)
+    finally:
+        for inst in instances:
+            teardown_paper_instance(inst)
+
+
+def main() -> None:
+    db_url = db_url_from_env()
+    teardown_all()
+    requeue_interrupted(db_url)
+    print("Paper arena monitor started; waiting for queued strategies.")
+    while True:
+        names = queued_strategies(db_url)
+        if names:
+            print(f"Starting paper cohort: {', '.join(names)}")
+            run_cohort(db_url, names)
+        else:
+            time.sleep(IDLE_POLL_SECS)
+
+
+if __name__ == "__main__":
+    main()

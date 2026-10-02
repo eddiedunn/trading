@@ -1,7 +1,9 @@
 FROM registry.starbluesolutions.net/library/python:3.13-slim
 
+# podman client: Phase 2 starts Freqtrade containers through the host's podman socket.
 RUN apt-get update && apt-get install -y \
     curl \
+    podman \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install uv
@@ -13,6 +15,9 @@ COPY backtest_api/ backtest_api/
 COPY paper/ paper/
 COPY scripts/ scripts/
 RUN uv pip install --system .
+
+ENV CONTAINER_HOST=unix:///run/podman/podman.sock
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8070
 

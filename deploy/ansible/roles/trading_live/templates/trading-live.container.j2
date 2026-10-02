@@ -1,0 +1,22 @@
+# Managed by ~/code/trading/deploy/ansible (role trading_live). Do not edit here.
+[Unit]
+Description=Trading Live Bot (Freqtrade — Hyperliquid, {{ 'DRY RUN' if trading_live_dry_run | bool else 'REAL MONEY' }})
+After=network-online.target trading-postgres.service
+
+[Container]
+Image={{ freqtrade_image }}
+ContainerName=trading-live
+# Run as the host user so the trade DB and logs in /opt/trading stay host-owned.
+UserNS=keep-id:uid=1000,gid=1000
+PublishPort=127.0.0.1:{{ trading_live_port }}:8080
+Volume={{ trading_live_userdir }}:/freqtrade/user_data:Z
+Volume={{ trading_live_dir }}:/freqtrade/live:Z
+Entrypoint=/bin/sh
+Exec=-c 'exec freqtrade trade --strategy "$$(cat /freqtrade/live/active_strategy.txt)" --strategy-path /freqtrade/live --userdir /freqtrade/user_data --config /freqtrade/live/config.json'
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

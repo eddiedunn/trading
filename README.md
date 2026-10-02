@@ -2,7 +2,11 @@
 
 Autonomous agent-driven perpetual futures trading on Hyperliquid. Four-phase pipeline: numpy fast filter, Freqtrade walk-forward, paper arena, live bot.
 
-**Design doc:** See `starblue-infra/docs/services/trading-stack.md` for full architecture.
+Code, deployment (Ansible in `deploy/ansible/`) and docs all live here:
+
+- [docs/runbook.md](docs/runbook.md) — services, deploy, running a strategy through the pipeline
+- [docs/design.md](docs/design.md) — architecture and reasoning
+- [docs/STATUS.md](docs/STATUS.md) — what works today
 
 ## Quick Start
 
@@ -22,31 +26,29 @@ uv run pytest
 
 ## Deployment
 
-All deployment is owned by **starblue-infra**. From that repo:
+From the Mac (the playbooks read secrets from gopass):
 
 ```bash
-ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_backtest_api.yml         # tela
-ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_postgres.yml     # trinity
-ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_paper_arena.yml  # trinity
-ansible-playbook -i inventory/vps/hosts.yml playbooks/deploy_trading_live.yml         # trinity
+make deploy      # tela: backtest API; trinity: postgres, paper arena, live bot (dry-run)
+make smoketest
+scripts/submit_strategy.sh strategies/examples/EmaCross.py --force
 ```
 
-- **tela:** `backtest_api` service (FastAPI on `127.0.0.1:8070`).
-- **trinity:** `trading_postgres` (5432), `trading_paper_arena` (monitor + dynamic 8090–8095), `trading_live` (Freqtrade on 8080).
-
-Secrets (gopass): `trading/postgres-password`, `trading/freqtrade-api-password`, `trading/hyperliquid-private-key`, `trading/hyperliquid-wallet-address`.
+See [docs/runbook.md](docs/runbook.md).
 
 ## Structure
 
 ```
 backtest_api/     Phase 1 numpy fast filter + Phase 2 Freqtrade walk-forward
-scripts/          OHLCV data collection (daily cron)
+scripts/          OHLCV + funding download, smoketest, submit_strategy
 paper/            Paper arena orchestrator + monitor
 live/             Live promotion CLI (trading_client)
 sql/              Postgres schema
-strategies/       Agent-written strategies (candidates/)
+strategies/       NullStrategy, examples/ (two-in-one strategy file format)
 config/           Freqtrade config templates
 tests/            Unit tests
+deploy/           Dockerfiles + Ansible (inventory, roles, playbooks)
+docs/             Runbook, design, status
 ```
 
 ## Live Promotion Workflow

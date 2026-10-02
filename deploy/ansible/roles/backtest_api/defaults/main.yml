@@ -1,0 +1,15 @@
+---
+backtest_api_image: localhost/backtest-api:latest
+backtest_api_port: 8070
+
+# Each directory is mounted at the same path inside the container, so paths the
+# API hands to sibling Freqtrade containers resolve on the host.
+backtest_api_root: /data/services/backtest_api
+backtest_api_data_dir: "{{ backtest_api_root }}/data"            # Phase 1 candles + funding
+backtest_api_ft_data_dir: "{{ backtest_api_root }}/ftdata"       # Freqtrade-format export
+backtest_api_strategies_dir: "{{ backtest_api_root }}/strategies"
+backtest_api_results_dir: "{{ backtest_api_root }}/results"
+
+# Hyperliquid only serves the last 5000 candles; older history is seeded from
+# the repo's data/ folder on the controller when the host has none.
+backtest_api_history_since: "2023-12-01"

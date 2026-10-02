@@ -1,0 +1,27 @@
+# Managed by ~/code/trading/deploy/ansible (role backtest_api). Do not edit here.
+[Unit]
+Description=Backtest API (Hyperliquid Trading Stack — Phase 1+2)
+After=network-online.target podman.socket
+
+[Container]
+Image={{ backtest_api_image }}
+ContainerName=backtest-api
+PublishPort=127.0.0.1:{{ backtest_api_port }}:8070
+Volume={{ backtest_api_data_dir }}:{{ backtest_api_data_dir }}:ro,Z
+Volume={{ backtest_api_ft_data_dir }}:{{ backtest_api_ft_data_dir }}:ro,Z
+Volume={{ backtest_api_strategies_dir }}:{{ backtest_api_strategies_dir }}:Z
+Volume={{ backtest_api_results_dir }}:{{ backtest_api_results_dir }}:Z
+Volume={{ trading_repo_remote }}/config:{{ trading_repo_remote }}/config:ro,Z
+Volume={{ podman_socket }}:/run/podman/podman.sock
+Environment=TRADING_DATA_DIR={{ backtest_api_data_dir }}
+Environment=TRADING_FT_DATA_DIR={{ backtest_api_ft_data_dir }}
+Environment=TRADING_STRATEGIES_DIR={{ backtest_api_strategies_dir }}
+Environment=TRADING_RESULTS_DIR={{ backtest_api_results_dir }}
+Environment=TRADING_CONFIG_DIR={{ trading_repo_remote }}/config
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

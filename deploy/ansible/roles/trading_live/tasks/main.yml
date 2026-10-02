@@ -1,0 +1,119 @@
+---
+# Phase 4 — the live Freqtrade bot on trinity.
+#
+# This bot runs ONE strategy at a time. The active strategy class name lives in
+# /opt/trading/live/active_strategy.txt and its code in /opt/trading/live/. The
+# trading_client CLI rewrites both during promote/retire; the Quadlet re-reads
+# active_strategy.txt at every (re)start, so `systemctl --user restart
+# trading-live.service` is all that's needed to swap strategies.
+
+- name: Refuse real-money mode unless confirmed
+  when: not (trading_live_dry_run | bool)
+  block:
+    - name: Assert that Hyperliquid + API secrets are not the default placeholder
+      ansible.builtin.assert:
+        that:
+          - hyperliquid_private_key not in ['', 'changeme']
+          - hyperliquid_wallet_address not in ['', 'changeme']
+        fail_msg: >-
+          Real-money mode needs gopass entries
+          {{ _trading_gopass_prefix }}/hyperliquid-private-key and
+          {{ _trading_gopass_prefix }}/hyperliquid-wallet-address.
+      no_log: true
+
+    - name: Confirm real-money trading
+      ansible.builtin.pause:
+        prompt: >-
+          trading_live_dry_run=false: the live bot will trade REAL funds from the
+          Hyperliquid wallet ({{ trading_env }}). Type LIVE to continue
+      register: trading_live_confirm
+
+    - name: Stop unless LIVE was typed
+      ansible.builtin.assert:
+        that: trading_live_confirm.user_input == 'LIVE'
+        fail_msg: Not confirmed; nothing was changed.
+
+- name: Assert Freqtrade API password is set
+  ansible.builtin.assert:
+    that:
+      - freqtrade_api_password not in ['', 'changeme']
+    fail_msg: "Populate gopass {{ _trading_gopass_prefix }}/freqtrade-api-password first."
+
+- name: Create /opt/trading directory tree
+  become: true
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  loop:
+    - /opt/trading
+    - /opt/trading/live
+    - /opt/trading/strategies
+    - /opt/trading/data
+
+- name: Enable user linger for {{ ansible_user }}
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_user }}"
+  changed_when: false
+
+- name: Copy NullStrategy.py from the repo (always overwrite)
+  ansible.builtin.copy:
+    src: "{{ trading_repo_local }}/strategies/NullStrategy.py"
+    dest: /opt/trading/strategies/NullStrategy.py
+    mode: '0644'
+    force: true
+
+- name: Initialize live strategy slot from NullStrategy (only if missing)
+  ansible.builtin.copy:
+    src: "{{ trading_repo_local }}/strategies/NullStrategy.py"
+    dest: /opt/trading/live/NullStrategy.py
+    mode: '0644'
+    force: false
+
+- name: Initialize active_strategy.txt (only if missing)
+  ansible.builtin.copy:
+    content: "NullStrategy\n"
+    dest: /opt/trading/live/active_strategy.txt
+    mode: '0644'
+    force: false
+
+- name: Pull current Freqtrade image (old ccxt cannot read Hyperliquid markets)
+  containers.podman.podman_image:
+    name: "{{ freqtrade_image }}"
+    force: true
+
+- name: Render Freqtrade live config.json
+  ansible.builtin.template:
+    src: live-config.json.j2
+    dest: /opt/trading/live/config.json
+    mode: '0600'
+  no_log: "{{ not (trading_live_dry_run | bool) }}"
+
+- name: Ensure user systemd directory exists
+  ansible.builtin.file:
+    path: "~/.config/containers/systemd"
+    state: directory
+    mode: '0755'
+
+- name: Deploy trading-live Quadlet
+  ansible.builtin.template:
+    src: trading-live.container.j2
+    dest: ~/.config/containers/systemd/trading-live.container
+    mode: '0644'
+
+- name: Restart trading-live.service
+  ansible.builtin.systemd_service:
+    name: trading-live.service
+    scope: user
+    daemon_reload: true
+    state: restarted
+
+- name: Wait for live bot REST API on port {{ trading_live_port }}
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ trading_live_port }}/api/v1/ping"
+  register: trading_live_ping
+  until: trading_live_ping.status == 200
+  retries: 30
+  delay: 5

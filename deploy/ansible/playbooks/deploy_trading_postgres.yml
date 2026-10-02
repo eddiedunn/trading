@@ -1,0 +1,18 @@
+---
+- name: Deploy Trading Postgres (trinity)
+  hosts: trinity
+  gather_facts: true
+  roles:
+    - trading_postgres
+  post_tasks:
+    - name: Verify required tables exist
+      ansible.builtin.command: >-
+        podman exec trading-postgres
+        psql -U {{ trading_postgres_user }} -d {{ trading_postgres_db }}
+        -tAc "SELECT tablename FROM pg_catalog.pg_tables
+              WHERE schemaname='public'
+                AND tablename IN ('paper_snapshots','strategy_registry')
+              ORDER BY tablename"
+      register: tp_tables
+      changed_when: false
+      failed_when: tp_tables.stdout_lines != ['paper_snapshots', 'strategy_registry']

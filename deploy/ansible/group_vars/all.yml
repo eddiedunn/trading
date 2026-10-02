@@ -1,0 +1,28 @@
+---
+# Shared settings for every trading role.
+
+# This repo on the Mac running Ansible, and where it is synced on each host.
+trading_repo_local: "{{ playbook_dir }}/../../.."
+trading_repo_remote: "{{ ansible_env.HOME }}/code/trading"
+
+# Environment switch: 'prod' (mainnet, default) or 'testnet' (Hyperliquid testnet
+# endpoint, separate gopass secrets under trading-test/*). Override per run:
+#   ansible-playbook ... -e trading_env=testnet
+trading_env: prod
+_trading_gopass_prefix: "trading{{ '-test' if trading_env == 'testnet' else '' }}"
+
+freqtrade_image: docker.io/freqtradeorg/freqtrade:stable
+
+# Freqtrade REST API credentials (live bot and paper instances)
+freqtrade_api_user: freqtrade
+freqtrade_api_password: "{{ lookup('pipe', 'gopass show ' + _trading_gopass_prefix + '/freqtrade-api-password 2>/dev/null || echo changeme') }}"
+
+# Trading Postgres on trinity
+trading_postgres_port: 5432
+trading_postgres_db: trading
+trading_postgres_user: trading
+trading_postgres_password: "{{ lookup('pipe', 'gopass show ' + _trading_gopass_prefix + '/postgres-password 2>/dev/null || echo changeme') }}"
+
+# Rootless podman socket of the deploy user; used by containers that start
+# sibling Freqtrade containers (Phase 2 backtests, paper instances).
+podman_socket: "/run/user/{{ ansible_user_uid }}/podman/podman.sock"

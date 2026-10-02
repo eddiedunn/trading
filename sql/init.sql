@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS strategy_registry (
     phase2_passed   BOOLEAN,
     phase2_stats    JSONB,
     paper_passed    BOOLEAN,
+    paper_queued_at   TIMESTAMPTZ,
+    paper_started_at  TIMESTAMPTZ,
+    paper_finished_at TIMESTAMPTZ,
     promoted_live   BOOLEAN DEFAULT FALSE,
     promoted_at     TIMESTAMPTZ,
     retired_at      TIMESTAMPTZ,
@@ -35,3 +38,8 @@ CREATE TABLE IF NOT EXISTS strategy_registry (
 );
 
 CREATE INDEX IF NOT EXISTS idx_strategy_registry_name ON strategy_registry (name);
+
+-- Paper arena queue columns (added 2026-10); no-ops on a fresh database.
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_queued_at   TIMESTAMPTZ;
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_started_at  TIMESTAMPTZ;
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_finished_at TIMESTAMPTZ;

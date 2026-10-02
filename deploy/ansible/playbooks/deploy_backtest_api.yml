@@ -1,0 +1,14 @@
+---
+- name: Deploy Backtest API (tela — Phase 1 fast filter + Phase 2 walk-forward)
+  hosts: tela
+  gather_facts: true
+  roles:
+    - backtest_api
+  post_tasks:
+    - name: Wait for /health
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ backtest_api_port }}/health"
+      register: backtest_api_health
+      until: backtest_api_health.status == 200
+      retries: 20
+      delay: 3

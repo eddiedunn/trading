@@ -5,6 +5,7 @@ Sub-millisecond per evaluation, 10,000 variants in under 10 seconds.
 """
 
 import importlib.util
+import os
 from pathlib import Path
 
 import numpy as np
@@ -15,8 +16,8 @@ FUNDING_RATE_PER_BAR = 0.0001  # ~0.01%/hr synthetic drag, applied per candle cl
 
 # Resolve paths relative to repo root
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = _REPO_ROOT / "data"
-STRATEGIES_DIR = _REPO_ROOT / "strategies" / "candidates"
+DATA_DIR = Path(os.environ.get("TRADING_DATA_DIR", str(_REPO_ROOT / "data")))
+STRATEGIES_DIR = Path(os.environ.get("TRADING_STRATEGIES_DIR", str(_REPO_ROOT / "strategies" / "candidates")))
 
 DEFAULT_PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
 

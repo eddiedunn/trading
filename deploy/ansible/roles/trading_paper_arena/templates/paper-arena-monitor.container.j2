@@ -1,0 +1,31 @@
+# Managed by ~/code/trading/deploy/ansible (role trading_paper_arena). Do not edit here.
+[Unit]
+Description=Trading Paper Arena Monitor
+After=network-online.target podman.socket trading-postgres.service
+Requires=trading-postgres.service
+
+[Container]
+Image={{ paper_arena_image }}
+ContainerName=paper-arena-monitor
+Exec=python -m paper.monitor
+# Host network: paper instances publish on 127.0.0.1:<port>, Postgres on 127.0.0.1.
+Network=host
+Volume={{ paper_arena_dir }}:{{ paper_arena_dir }}:Z
+Volume={{ podman_socket }}:/run/podman/podman.sock
+Environment=TRADING_PAPER_DIR={{ paper_arena_dir }}
+Environment=POSTGRES_HOST=127.0.0.1
+Environment=POSTGRES_PORT={{ trading_postgres_port }}
+Environment=POSTGRES_DB={{ trading_postgres_db }}
+Environment=POSTGRES_USER={{ trading_postgres_user }}
+Environment=POSTGRES_PASSWORD={{ trading_postgres_password }}
+Environment=FREQTRADE_API_USER={{ freqtrade_api_user }}
+Environment=FREQTRADE_API_PASSWORD={{ freqtrade_api_password }}
+Environment=TRADING_ENV={{ trading_env }}
+Environment=PYTHONUNBUFFERED=1
+
+[Service]
+Restart=always
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

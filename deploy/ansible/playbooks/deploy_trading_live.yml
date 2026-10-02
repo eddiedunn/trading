@@ -1,0 +1,16 @@
+---
+# Dry-run (pretend money) by default. Real money needs
+#   -e trading_live_dry_run=false
+# plus typing LIVE at the prompt.
+- name: Deploy Trading Live Bot (trinity — Phase 4)
+  hosts: trinity
+  gather_facts: true
+  pre_tasks:
+    - name: Show trading mode
+      ansible.builtin.debug:
+        msg: >-
+          Live bot mode: {{ 'DRY RUN (pretend money, no wallet key)' if trading_live_dry_run | default(true) | bool
+          else 'REAL MONEY' }} on {{ trading_env }}. Strategy stays NullStrategy until promoted
+          with trading_client.
+  roles:
+    - trading_live

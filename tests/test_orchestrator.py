@@ -20,7 +20,7 @@ from paper.orchestrator import (
     PaperInstance,
     BASE_PORT,
     MAX_SLOTS,
-    PAPER_CONFIGS_DIR,
+    configs_dir,
 )
 
 
@@ -64,11 +64,11 @@ class TestBuildPaperConfig:
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_pair_whitelist(self):
-        """Config has BTC, ETH, SOL pairs."""
+        """Config has BTC, ETH, SOL pairs, under exchange where Freqtrade reads them."""
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
-        assert "pair_whitelist" in cfg
-        pairs = cfg["pair_whitelist"]
+        assert "pair_whitelist" not in cfg
+        pairs = cfg["exchange"]["pair_whitelist"]
         assert len(pairs) == 3
         assert any("BTC" in p for p in pairs)
         assert any("ETH" in p for p in pairs)
@@ -224,10 +224,27 @@ class TestSpawnPaperInstance:
         assert "paper_mystrat_1" in call_args
         assert "-v" in call_args
         assert "-p" in call_args
-        assert "freqtradeorg/freqtrade:stable" in call_args
+        assert "docker.io/freqtradeorg/freqtrade:stable" in call_args
+        assert "--userns=keep-id:uid=1000,gid=1000" in call_args
         assert "trade" in call_args
         assert "--strategy" in call_args
         assert "MyStrat" in call_args
+        assert call_args[call_args.index("--strategy-path") + 1] == "/freqtrade/strategies"
+
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme", "TRADING_PAPER_DIR": "/data/paper"})
+    @patch("paper.orchestrator.subprocess.run")
+    @patch("paper.orchestrator.Path.mkdir")
+    @patch("paper.orchestrator.Path.write_text")
+    def test_spawn_mounts_follow_paper_dir(self, mock_write, mock_mkdir, mock_subprocess):
+        """Mounts come from TRADING_PAPER_DIR so they resolve on the host."""
+        mock_subprocess.return_value = MagicMock(returncode=0)
+
+        spawn_paper_instance("MyStrat", slot=0)
+
+        call_args = mock_subprocess.call_args[0][0]
+        assert "/data/paper/strategies:/freqtrade/strategies:ro,Z" in call_args
+        assert "/data/paper/configs:/freqtrade/config:ro,Z" in call_args
+        assert "/data/paper/logs/MyStrat:/freqtrade/logs:Z" in call_args
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     @patch("paper.orchestrator.subprocess.run")

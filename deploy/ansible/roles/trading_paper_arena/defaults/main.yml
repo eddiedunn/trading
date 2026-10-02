@@ -1,0 +1,8 @@
+---
+# Container image for the paper-arena monitor (deploy/Dockerfile.paper).
+paper_arena_image: localhost/trading-paper-monitor:latest
+
+# Candidate strategies, per-slot Freqtrade configs and logs. Mounted at the same
+# path inside the monitor so paths handed to sibling Freqtrade containers
+# resolve on the host.
+paper_arena_dir: /data/services/trading/paper

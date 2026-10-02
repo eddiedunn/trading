@@ -1,0 +1,14 @@
+---
+- name: Deploy Paper Arena Monitor (trinity — Phase 3)
+  hosts: trinity
+  gather_facts: true
+  roles:
+    - trading_paper_arena
+  post_tasks:
+    - name: Verify paper-arena-monitor.service stays active
+      ansible.builtin.command: systemctl --user is-active paper-arena-monitor.service
+      register: paper_arena_active
+      changed_when: false
+      until: paper_arena_active.stdout == "active"
+      retries: 6
+      delay: 5

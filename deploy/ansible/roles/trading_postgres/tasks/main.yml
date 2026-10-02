@@ -1,0 +1,123 @@
+---
+- name: Assert trading_postgres password is set (not empty / changeme)
+  ansible.builtin.assert:
+    that:
+      - trading_postgres_password is defined
+      - trading_postgres_password | length > 0
+      - trading_postgres_password not in ['', 'changeme']
+    fail_msg: >-
+      trading_postgres_password is unset or still 'changeme'.
+      Set it via gopass: `gopass insert trading/postgres-password`
+      (the default lookup is `gopass show trading/postgres-password`).
+
+- name: Ensure trading_postgres data directory exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ trading_postgres_data_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+
+- name: Ensure parent of schema marker exists
+  become: true
+  ansible.builtin.file:
+    path: "{{ trading_postgres_schema_marker | dirname }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Enable user linger for {{ ansible_user }}
+  become: true
+  ansible.builtin.command: "loginctl enable-linger {{ ansible_user }}"
+  register: linger_result
+  failed_when: false
+  changed_when: false
+
+- name: Ensure remote sql directory exists
+  ansible.builtin.file:
+    path: "{{ trading_repo_remote }}/sql"
+    state: directory
+    mode: "0755"
+
+- name: Sync init.sql to trinity
+  ansible.builtin.copy:
+    src: "{{ trading_repo_local }}/sql/init.sql"
+    dest: "{{ trading_repo_remote }}/sql/init.sql"
+    mode: "0644"
+  register: trading_postgres_init_sql
+
+- name: Ensure ~/.config/containers/systemd directory exists
+  ansible.builtin.file:
+    path: ~/.config/containers/systemd
+    state: directory
+    mode: "0755"
+
+- name: Template trading-postgres Quadlet container
+  ansible.builtin.template:
+    src: trading-postgres.container.j2
+    dest: ~/.config/containers/systemd/trading-postgres.container
+    mode: "0600"  # holds the database password
+
+- name: Start trading-postgres user service
+  ansible.builtin.systemd_service:
+    name: trading-postgres.service
+    scope: user
+    daemon_reload: true
+    state: started
+
+- name: Check schema-initialized marker
+  ansible.builtin.stat:
+    path: "{{ trading_postgres_schema_marker }}"
+  register: trading_postgres_schema_marker_stat
+
+- name: Wait for trading_postgres to accept connections
+  ansible.builtin.command: >-
+    podman exec trading-postgres pg_isready -h 127.0.0.1
+    -U {{ trading_postgres_user }} -d {{ trading_postgres_db }}
+  register: tp_ready
+  until: tp_ready.rc == 0
+  retries: 20
+  delay: 3
+  changed_when: false
+
+# init.sql is idempotent (IF NOT EXISTS throughout), so it is re-applied
+# whenever it changes; the marker records that the first apply happened.
+- name: Apply init.sql schema
+  ansible.builtin.shell: |
+    set -euo pipefail
+    podman exec -i -e PGPASSWORD="$PGPW" trading-postgres \
+      psql -v ON_ERROR_STOP=1 -h 127.0.0.1 \
+        -U {{ trading_postgres_user }} -d {{ trading_postgres_db }} \
+        < {{ trading_repo_remote }}/sql/init.sql
+  args:
+    executable: /bin/bash
+  environment:
+    PGPW: "{{ trading_postgres_password }}"
+  no_log: true
+  register: tp_schema_apply
+  when: not trading_postgres_schema_marker_stat.stat.exists or trading_postgres_init_sql.changed
+
+- name: Create schema-initialized marker
+  become: true
+  ansible.builtin.file:
+    path: "{{ trading_postgres_schema_marker }}"
+    state: touch
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+  when:
+    - not trading_postgres_schema_marker_stat.stat.exists
+    - tp_schema_apply is succeeded
+
+- name: Display trading_postgres deployment summary
+  ansible.builtin.debug:
+    msg:
+      - "trading_postgres deployed"
+      - "Host: 127.0.0.1"
+      - "Port: {{ trading_postgres_port }}"
+      - "Database: {{ trading_postgres_db }}"
+      - "User: {{ trading_postgres_user }}"
+      - "Data dir: {{ trading_postgres_data_dir }}"
+      - "Schema marker: {{ trading_postgres_schema_marker }}"

@@ -1,24 +1,37 @@
 {
   "exchange": {
     "name": "hyperliquid",
-    "options": {
-      "defaultType": "swap"
-    }
+    "ccxt_config": {
+      "options": {
+        "defaultType": "swap"
+      }
+    },
+    "pair_whitelist": [
+      "BTC/USDC:USDC",
+      "ETH/USDC:USDC",
+      "SOL/USDC:USDC"
+    ]
   },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
   "trading_mode": "futures",
   "margin_mode": "isolated",
   "stake_currency": "USDC",
   "stake_amount": 33,
   "max_open_trades": 3,
   "timeframe": "4h",
-  "pair_whitelist": [
-    "BTC/USDC:USDC",
-    "ETH/USDC:USDC",
-    "SOL/USDC:USDC"
-  ],
   "dry_run": true,
   "dry_run_wallet": 100,
   "stoploss": -0.05,
   "trailing_stop": true,
-  "trailing_stop_positive": 0.02
+  "trailing_stop_positive": 0.02,
+  "entry_pricing": {
+    "price_side": "same"
+  },
+  "exit_pricing": {
+    "price_side": "same"
+  }
 }

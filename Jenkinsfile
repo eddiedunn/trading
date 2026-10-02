@@ -1,10 +1,11 @@
+// Tests and scans only. Deploys run from the Mac with `make deploy`,
+// because the playbooks read secrets from gopass.
 pipeline {
     agent { label 'linux && gpu && compute' }
 
     environment {
         SONAR_HOST_URL    = 'http://127.0.0.1:9200'
         SONAR_PROJECT_KEY = 'trading'
-        DEPLOY_PLAYBOOK   = 'deploy/ansible-deploy.yml'
     }
 
     options {
@@ -66,17 +67,6 @@ pipeline {
                         -Dsonar.host.url="${SONAR_HOST_URL}" \
                         -Dsonar.token="${SONAR_TOKEN}"'''
                 }
-            }
-        }
-
-        stage('Deploy') {
-            steps {
-                sh '''ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
-                    -i "127.0.0.1," \
-                    "${DEPLOY_PLAYBOOK}" \
-                    --connection local \
-                    -e "trading_src_dir=${WORKSPACE}" \
-                    -e "build_number=${BUILD_NUMBER}"'''
             }
         }
     }
