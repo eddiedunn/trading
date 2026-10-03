@@ -16,9 +16,27 @@ run from the Mac (`make deploy`) because the playbooks read secrets from gopass.
 | trinity | `paper_<name>_<slot>` containers | 127.0.0.1:8090–8095 | One Freqtrade dry-run per paper candidate, started by the monitor |
 | trinity | `trading-live.service` | 127.0.0.1:8080 | The live Freqtrade bot. **Dry-run by default**, strategy `NullStrategy` until promoted |
 
-Caddy on tela proxies `backtest.starbluesolutions.net` → `localhost:8070` (that
-entry stays in starblue-infra, which owns Caddy). From the Mac, the scripts reach
-the API through `ssh tela`.
+## Web UIs
+
+On the `eddiedunn.github` tailnet (tela and trinity's tailnet), through Caddy
+with the `*.starbluesolutions.net` wildcard cert. The routes live in
+starblue-infra, which owns Caddy; the names resolve through pfSense host
+overrides to each box's Tailscale address.
+
+| Address | What |
+|---|---|
+| https://trading.starbluesolutions.net | Live bot FreqUI (trinity 8080) |
+| https://paper.starbluesolutions.net | Paper arena slot 0 FreqUI (trinity 8090) |
+| https://backtest.starbluesolutions.net/docs | Backtest API page (tela 8070) |
+
+FreqUI login: user `freqtrade`, password `gopass show trading/freqtrade-api-password`.
+Open each bot in its own tab; one FreqUI showing both bots would need
+`CORS_origins` set in the bot configs. Paper slots 1–5 (8091–8095) have no
+names yet.
+
+Without the tailnet: `ssh -N -L 8080:127.0.0.1:8080 -L 8090:127.0.0.1:8090 trinity`
+and open http://localhost:8080 / :8090. The scripts reach the backtest API
+through `ssh tela`.
 
 ### Data locations
 
