@@ -83,11 +83,37 @@ and — only read for real-money mode — `trading/hyperliquid-private-key`,
 
 One file per strategy, named after its class. It serves every phase:
 
-- a module-level `generate_signals(df) -> Series` of 0/1 positions for Phase 1, and
+- a module-level `generate_signals(df) -> Series` of positions (1 long, 0 flat,
+  -1 short) for Phase 1, and
 - a Freqtrade `IStrategy` subclass for Phase 2, the final test and paper.
 
-See `strategies/examples/EmaCross.py`. Freqtrade is optional at import so Phase 1
-can load the file without it.
+See `strategies/examples/EmaCross.py` for the format,
+`strategies/examples/FundingFade.py` for funding and shorts, and
+`strategies/examples/RelativeStrength.py` for the other coins' closes.
+Freqtrade is optional at import so Phase 1 can load the file without it.
+
+Phase 1 calls `generate_signals` once per pair, on development bars only. Its
+`df` has the pair's OHLCV (`timestamp` = bar open time) plus:
+
+- `funding_rate`: the pair's signed hourly funding summed over the bar's own
+  hours, the payments stamped T+1h .. T+4h for the bar opening at T. The last
+  is paid at the bar's close, so the sum is known when the bar closes. It is the
+  same funding Phase 1 charges a position held over that bar. NaN where there is
+  no funding data (no `<PAIR>_funding_1h.feather`, or the bar is outside it).
+- `close_BTC`, `close_ETH`, `close_SOL`: each coin's close for the bar with the
+  same open time; NaN where that coin has no bar.
+- `funding_BTC`, `funding_ETH`, `funding_SOL`: each coin's `funding_rate`.
+
+Every value in row t is known at the close of bar t, so the look-ahead prefix
+check applies unchanged (`add_context_columns` in `backtest_api/fast_filter.py`).
+
+The class builds the same columns itself: funding from
+`self.dp.get_pair_dataframe(pair, "1h", candle_type="funding_rate")` (rate in
+`open`), resampled to 4h with `closed="right", label="left"` so (T, T+4h] lands
+on the bar opening at T; other coins from `informative_pairs()` plus
+`merge_informative_pair(..., ffill=False, append_timeframe=False, suffix=coin)`.
+Shorts need `can_short = True` and `enter_short`/`exit_short`. Phase 2 gives 120
+candles of warm-up, so keep `startup_candle_count` at 120 or less.
 
 ## Campaigns and the held-back data
 
@@ -196,7 +222,14 @@ against buy-and-hold's plus its beta, the campaign's attempt count and current
 Sharpe bar. Phase 2 runs only after Phase 1 passes, and Claude sees every
 period's metrics (all development data). The prompt tells Claude that the last
 6 months are held back, that every attempt raises the Sharpe bar, and that it
-must beat buy-and-hold on Sharpe.
+must beat buy-and-hold on Sharpe. It also describes the extra Phase 1 columns
+(funding, the other coins), the Freqtrade calls that rebuild them, that shorts
+are allowed, and that the -35% per-pair and -20% account drawdown limits sink
+always-long strategies. With no `--seed`, seeds come from `DEFAULT_SEEDS` in
+`agent/prompts.py`: funding-extreme fades, funding carry with the trend,
+relative-strength rotation, BTC-leads-alts lead-lag, volatility regime
+switching, short-only breakdowns, an ETH/BTC market-neutral pair, fading
+liquidation-style spikes, cross-coin funding divergence and uncrowded breakouts.
 
 The agent can only call phases 1 and 2; it has no path to the final test,
 paper-add or promote.

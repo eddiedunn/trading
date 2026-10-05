@@ -33,6 +33,10 @@ STRATEGIES_DIR = Path(os.environ.get("TRADING_STRATEGIES_DIR", str(_REPO_ROOT / 
 
 DEFAULT_PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
 
+# Coins whose close and funding every pair's df carries as close_<COIN> / funding_<COIN>,
+# whatever pairs the run itself covers, so a strategy always sees the same columns.
+CONTEXT_COINS = ("BTC", "ETH", "SOL")
+
 
 class SignalError(ValueError):
     """generate_signals returned something outside the documented contract."""
@@ -78,6 +82,8 @@ def run_fast_filter(
         df = periods.development_part(pd.read_feather(feather_path))
         if df.empty:
             continue
+        funding = load_funding(data_dir, pair, df["timestamp"])
+        df = add_context_columns(df, pair, data_dir, funding)
         try:
             signals = validate_signals(mod.generate_signals(df.copy()), df.index)
             lookahead = _lookahead_mismatch(mod.generate_signals, df, signals)
@@ -85,7 +91,6 @@ def run_fast_filter(
             return {"error": f"{pair}: {e}", "invalid_signals": True, "per_pair": {}}
 
         timestamps = df["timestamp"]
-        funding = load_funding(data_dir, pair, timestamps)
         returns, trade_returns = _simulate(df["close"], signals, funding=funding)
         metrics = _metrics(returns, trade_returns, timestamps=timestamps)
         if funding is None:
@@ -176,6 +181,60 @@ def _lookahead_mismatch(generate_signals, df: pd.DataFrame, full: pd.Series) -> 
             i = int(np.argmax(~same))
             return f"bar {i} is {a[i]:g} with all data but {b[i]:g} with only the first {k} bars"
     return None
+
+
+def _coin(pair: str) -> str:
+    """'BTC_USDC-USDC_4h' -> 'BTC'."""
+    return pair.split("_", 1)[0]
+
+
+def _timeframe(pair: str) -> str:
+    """'BTC_USDC-USDC_4h' -> '4h'."""
+    return pair.rsplit("_", 1)[1]
+
+
+def add_context_columns(
+    df: pd.DataFrame, pair: str, data_dir: Path, funding: pd.Series | None = None
+) -> pd.DataFrame:
+    """Return ``df`` with the extra columns ``generate_signals`` gets. Every value is known
+    at the close of its bar, so a signal computed from row t uses nothing after bar t.
+
+    - ``funding_rate``: this pair's signed funding summed over the bar's own hours, i.e. the
+      payments stamped T+1h .. T+len for the bar opening at T (see ``load_funding``). The last
+      of those is paid at the bar's close, so the whole sum is known when the bar closes. It is
+      the same per-bar funding a position held over this bar pays in ``_simulate``. NaN where
+      there is no funding data (file missing, or the bar is outside the file's range).
+    - ``close_<COIN>`` for BTC, ETH, SOL: that coin's close for the bar with the same open
+      time (the same moment). NaN where that coin has no bar.
+    - ``funding_<COIN>``: that coin's ``funding_rate``, aligned the same way.
+
+    ``funding`` is this pair's already-loaded ``load_funding`` result (None if no file).
+    Rows are matched by timestamp, so any prefix of the result equals the result computed on
+    that prefix: the look-ahead prefix check still applies unchanged.
+    """
+    out = df.copy()
+    ts = pd.to_datetime(out["timestamp"], utc=True)
+    own = funding if funding is not None else load_funding(data_dir, pair, out["timestamp"])
+    out["funding_rate"] = np.nan if own is None else np.asarray(own, dtype=float)
+    tf = _timeframe(pair)
+    for coin in CONTEXT_COINS:
+        other = f"{coin}_USDC-USDC_{tf}"
+        if other == pair:
+            out[f"close_{coin}"] = out["close"].to_numpy(dtype=float)
+            out[f"funding_{coin}"] = out["funding_rate"].to_numpy(dtype=float)
+            continue
+        close = pd.Series(np.nan, index=out.index)
+        path = data_dir / f"{other}.feather"
+        if path.exists():
+            o = pd.read_feather(path, columns=["timestamp", "close"])
+            by_ts = pd.Series(o["close"].to_numpy(dtype=float),
+                              index=pd.DatetimeIndex(pd.to_datetime(o["timestamp"], utc=True)))
+            by_ts = by_ts[~by_ts.index.duplicated(keep="last")]
+            close = pd.Series(by_ts.reindex(pd.DatetimeIndex(ts)).to_numpy(), index=out.index)
+        out[f"close_{coin}"] = close.to_numpy(dtype=float)
+        f = load_funding(data_dir, other, out["timestamp"])
+        out[f"funding_{coin}"] = np.nan if f is None else np.asarray(f, dtype=float)
+    return out
 
 
 def funding_path(data_dir: Path, pair: str) -> Path:
