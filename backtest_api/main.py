@@ -48,7 +48,22 @@ def _write_strategy(req: BacktestRequest) -> None:
     strat_path.write_text(req.strategy_code)
 
 
-def _required_sharpe(attempts: int, stats: dict):
+def _bar_attempts(effective: float) -> float:
+    """The N to give the Sharpe bar for an effective (fractional) trial count.
+
+    fast_filter.expected_max_sharpe's formula goes negative for N just above 1
+    (about -0.03 at N = 1.25, -0.52 at N = 1.01; it crosses 0 near N = 1.29), which
+    would put the bar *below* max(0.8, buy-and-hold). Where it is not positive, use
+    N = 1 (noise bar 0) instead; above that crossing it is increasing, so the bar
+    never drops as trials are added.
+    """
+    from backtest_api.fast_filter import expected_max_sharpe
+
+    n = max(1.0, float(effective))
+    return n if expected_max_sharpe(n, 1.0) > 0 else 1.0
+
+
+def _required_sharpe(attempts: float, stats: dict):
     from backtest_api.fast_filter import required_sharpe
 
     years = stats.get("years")
@@ -74,12 +89,15 @@ def run_backtest(req: BacktestRequest):
             raise HTTPException(422, stats["error"])
         if "error" in stats:
             raise HTTPException(500, stats["error"])
-        attempts = ledger.attempt_count(campaign)
-        passed = bool(meets_phase1_criteria(stats, attempts=attempts))
+        # Counted after this run was recorded, so it counts toward its own bar.
+        counts = ledger.attempt_counts(campaign)
+        n = _bar_attempts(counts["effective"])
+        passed = bool(meets_phase1_criteria(stats, attempts=n))
         ledger.finish_attempt(attempt_id, passed)
         return _plain({
-            "phase": 1, "campaign": campaign, "attempts": attempts,
-            "required_sharpe": _required_sharpe(attempts, stats), "stats": stats, "passed": passed,
+            "phase": 1, "campaign": campaign, "attempts": round(counts["effective"], 2),
+            "ideas": counts["ideas"], "versions": counts["versions"],
+            "required_sharpe": _required_sharpe(n, stats), "stats": stats, "passed": passed,
         })
 
     if req.phase == 2:

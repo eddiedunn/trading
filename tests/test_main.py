@@ -98,15 +98,36 @@ class TestPhase1:
     def test_returns_attempts_and_required_sharpe(self, phase1):
         body = _post(1).json()
         assert body["campaign"] == CAMPAIGN and body["attempts"] == 1 and body["required_sharpe"] == 1.25
+        assert body["ideas"] == 1 and body["versions"] == 1
         phase1.required.assert_called_once_with(1, 2.3, 0.7)
         assert phase1.criteria.call_args.kwargs == {"attempts": 1}
 
-    def test_attempts_count_distinct_code(self, phase1):
+    def test_attempts_are_effective_trials(self, phase1):
         assert _post(1, code=CODE).json()["attempts"] == 1
         assert _post(1, code=CODE + "   \n\n").json()["attempts"] == 1  # whitespace-only edit
         assert _post(1, name="Other", code=CODE).json()["attempts"] == 1  # same code renamed
-        assert _post(1, code=CODE.replace("0", "2")).json()["attempts"] == 2
-        assert phase1.criteria.call_args.kwargs == {"attempts": 2}
+        body = _post(1, code=CODE.replace("0", "2")).json()  # a revision of S
+        assert (body["attempts"], body["ideas"], body["versions"]) == (1.25, 1, 2)
+        body = _post(1, name="New", code=CODE.replace("0", "3")).json()  # a new idea
+        assert (body["attempts"], body["ideas"], body["versions"]) == (2.25, 2, 3)
+        assert phase1.criteria.call_args.kwargs == {"attempts": 2.25}
+        phase1.required.assert_called_with(2.25, 2.3, 0.7)
+
+    def test_two_ideas_three_versions_pass_three(self, phase1):
+        for name in ("A", "B"):
+            for v in range(3):
+                body = _post(1, name=name, code=CODE + f"# {name} v{v}\n").json()
+        assert (body["attempts"], body["ideas"], body["versions"]) == (3.0, 2, 6)
+        assert phase1.criteria.call_args.kwargs == {"attempts": 3.0}
+        phase1.required.assert_called_with(3.0, 2.3, 0.7)
+
+    def test_effective_count_where_the_formula_dips_uses_one(self, phase1):
+        """At N = 1.25 expected_max_sharpe is negative, so the bar uses N = 1 instead."""
+        _post(1, code=CODE)
+        body = _post(1, code=CODE.replace("0", "2")).json()
+        assert body["attempts"] == 1.25
+        assert phase1.criteria.call_args.kwargs == {"attempts": 1.0}
+        phase1.required.assert_called_with(1.0, 2.3, 0.7)
 
     def test_failed_run_still_counts(self, phase1):
         phase1.filter.return_value = {"error": "BTC: generate_signals returned 3 NaN values",

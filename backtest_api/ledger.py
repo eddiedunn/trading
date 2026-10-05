@@ -1,8 +1,8 @@
 """Attempt ledger: what the backtest API has run, per campaign.
 
-A campaign is one holdout date (periods.campaign_id()). The ledger counts how
-many distinct pieces of code reached Phase 1 in the campaign (the Phase 1 Sharpe
-bar rises with that count), remembers which code passed Phase 2, and allows each
+A campaign is one holdout date (periods.campaign_id()). The ledger counts the
+effective number of trials that reached Phase 1 in the campaign (the Phase 1
+Sharpe bar rises with that count; see attempt_counts()), remembers which code passed Phase 2, and allows each
 piece of code, and each strategy name, exactly one final test on the held-back data.
 
 One SQLite file, TRADING_RESULTS_DIR/ledger.sqlite, created on first use.
@@ -92,15 +92,59 @@ def finish_attempt(attempt_id: int, passed: bool | None) -> None:
         conn.close()
 
 
-def attempt_count(campaign: str) -> int:
-    """Distinct pieces of code that reached Phase 1 in this campaign."""
+# How much a revision of an existing idea (same strategy name, new code) adds to the
+# effective trial count, relative to a brand-new idea.
+#
+# The multiple-testing bar (fast_filter.expected_max_sharpe, Bailey & Lopez de Prado)
+# assumes N *independent* trials. Revisions of one idea share its signal, its
+# indicators and most of its parameters, so their returns are highly correlated:
+# counting each as a full trial overstates N and pushes the bar up too fast (a real
+# run went 0.80 -> 1.66 after 2 ideas x 3 revisions). Each revision still is a
+# search step, though, so it can't count as zero either. 0.25 is a judgement call,
+# not an estimate of the actual correlation.
+#
+# Limits: the count trusts the strategy name. A human could rename every revision to
+# make it count fully (raising their own bar, harmless) or reuse one name for
+# unrelated ideas to make them count as revisions (gaming it down). The agent names
+# each idea once and keeps the name across revisions (agent/loop.py), so for agent
+# runs the name is a fair idea label.
+REVISION_WEIGHT = 0.25
+
+
+def attempt_counts(campaign: str) -> dict:
+    """Trials that reached Phase 1 in this campaign.
+
+    - ``versions``: distinct code hashes, from any strategy.
+    - ``ideas``: distinct strategy names that brought new code, i.e. were the
+      first to submit at least one of those hashes. Normally that's every name; a
+      name that only re-submitted code another name already ran is not a new idea.
+    - ``effective``: ideas + REVISION_WEIGHT * (versions - ideas), the N used for
+      the Sharpe bar. 0.0 before anything is tried, else >= 1, and identical code
+      under any name never adds to it.
+
+    Computed from the existing ``attempts`` columns; no schema change.
+    """
     conn = _connect()
     try:
-        return conn.execute(
-            "SELECT COUNT(DISTINCT code_sha256) FROM attempts WHERE campaign = ? AND phase = 1", (campaign,)
-        ).fetchone()[0]
+        ideas, versions = conn.execute(
+            """
+            WITH first_run AS (
+                SELECT code_sha256, MIN(id) AS id FROM attempts
+                WHERE campaign = ? AND phase = 1 GROUP BY code_sha256
+            )
+            SELECT COUNT(DISTINCT a.strategy_name), COUNT(*)
+            FROM first_run f JOIN attempts a ON a.id = f.id
+            """,
+            (campaign,),
+        ).fetchone()
     finally:
         conn.close()
+    return {"ideas": ideas, "versions": versions, "effective": float(ideas + REVISION_WEIGHT * (versions - ideas))}
+
+
+def attempt_count(campaign: str) -> float:
+    """Effective number of trials that reached Phase 1 in this campaign (see attempt_counts)."""
+    return attempt_counts(campaign)["effective"]
 
 
 def phase2_passed(campaign: str, sha: str) -> bool:
