@@ -121,9 +121,19 @@ slot is released and it can be run again.
 - `final_tests(campaign, code_sha256, strategy_name, passed, result_json, ts)`:
   one row per final test, unique per campaign on the code and on the name.
 
-The attempt count is the number of distinct code hashes that reached Phase 1
-in the campaign, from any strategy. Code is hashed after stripping trailing
-whitespace, so re-saving a file is not a new attempt; any other edit is.
+The attempt count that sets the Sharpe bar is an effective number of trials,
+computed from the Phase 1 rows of the campaign: each new strategy name (idea)
+counts 1, and each further distinct piece of code (a revision) counts
+`REVISION_WEIGHT` = 0.25 (`backtest_api/ledger.py`), so 2 ideas x 3 versions
+is 2 + 0.25 x 4 = 3.0. Revisions of one idea are highly correlated, so counting
+each as an independent trial overstated the bar. Code is hashed after stripping
+trailing whitespace, so re-saving a file is not a new attempt; any other edit
+is. The same code under another name adds nothing. The count trusts the name:
+the agent keeps one name per idea across revisions, but a human reusing a name
+for unrelated ideas would get a lower bar than they should. Phase 1 responses
+show `attempts` (effective), `ideas`, `versions` and `required_sharpe`. Below
+about 1.3 effective trials the bar stays at its base (the noise formula dips
+negative there).
 
 Read it from inside the API container (Python's `sqlite3` module; the host
 may not have the `sqlite3` command):

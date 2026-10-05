@@ -42,6 +42,34 @@ class TestAttempts:
         assert ledger.attempt_count("c2") == 1
         assert ledger.attempt_count("c3") == 0
 
+    def test_revisions_of_one_idea_count_at_revision_weight(self):
+        for name in ("A", "B"):
+            for v in range(3):
+                ledger.record_attempt("c1", name, f"{name}{v}", 1)
+        assert ledger.REVISION_WEIGHT == 0.25
+        assert ledger.attempt_counts("c1") == {"ideas": 2, "versions": 6, "effective": 3.0}  # 2 + 0.25 * 4
+
+    def test_resubmitting_identical_code_adds_nothing(self):
+        ledger.record_attempt("c1", "A", "a1", 1)
+        ledger.record_attempt("c1", "A", "a2", 1)
+        before = ledger.attempt_counts("c1")
+        ledger.record_attempt("c1", "A", "a2", 1)
+        ledger.record_attempt("c1", "B", "a2", 1)  # same code under a new name is not a new trial
+        after = ledger.attempt_counts("c1")
+        assert after == before == {"ideas": 1, "versions": 2, "effective": 1.25}
+
+    def test_new_name_with_new_code_adds_a_full_trial(self):
+        ledger.record_attempt("c1", "A", "a1", 1)
+        ledger.record_attempt("c1", "A", "a2", 1)
+        before = ledger.attempt_count("c1")
+        ledger.record_attempt("c1", "B", "b1", 1)
+        assert ledger.attempt_count("c1") == before + 1
+
+    def test_at_least_one_once_anything_is_tried(self):
+        assert ledger.attempt_counts("c1") == {"ideas": 0, "versions": 0, "effective": 0.0}
+        ledger.record_attempt("c1", "A", "a1", 1)
+        assert ledger.attempt_count("c1") == 1.0
+
     def test_finish_attempt_sets_passed(self):
         row = ledger.record_attempt("c1", "A", "sha1", 2)
         assert not ledger.phase2_passed("c1", "sha1")
