@@ -76,19 +76,16 @@ class TestMeetsPromotionCriteria:
         metrics["max_drawdown"] = PROMOTION_CRITERIA["max_drawdown_pct"] - 5.0
         assert meets_promotion_criteria(metrics) is False
 
-    def test_win_rate_boundary(self):
-        """Test win_rate at boundary."""
+    def test_low_win_rate_still_passes(self):
+        """Win rate is not gated: a 30% win rate with big winners passes."""
         metrics = {
             "trade_count": 30,
             "profit_pct": 10.0,
             "max_drawdown": -10.0,
-            "win_rate": PROMOTION_CRITERIA["min_win_rate"],
+            "win_rate": 0.30,
             "profit_factor": 1.5,
         }
         assert meets_promotion_criteria(metrics) is True
-
-        metrics["win_rate"] = PROMOTION_CRITERIA["min_win_rate"] - 0.01
-        assert meets_promotion_criteria(metrics) is False
 
     def test_profit_factor_boundary(self):
         """Test profit_factor at boundary."""

@@ -29,7 +29,6 @@ PROMOTION_CRITERIA = {
     "min_trades": 20,
     "min_profit_pct": 5.0,  # % total return over window
     "max_drawdown_pct": -15.0,
-    "min_win_rate": 0.45,
     "min_profit_factor": 1.25,
 }
 
@@ -57,13 +56,15 @@ def collect_metrics(instance: PaperInstance) -> dict:
 
 
 def meets_promotion_criteria(metrics: dict) -> bool:
-    """Check if a paper instance meets promotion thresholds."""
+    """Check if a paper instance meets promotion thresholds.
+
+    Win rate is recorded but not gated, the same as in Phase 1.
+    """
     c = PROMOTION_CRITERIA
     return (
         metrics["trade_count"] >= c["min_trades"]
         and metrics["profit_pct"] >= c["min_profit_pct"]
         and metrics["max_drawdown"] >= c["max_drawdown_pct"]
-        and metrics["win_rate"] >= c["min_win_rate"]
         and metrics["profit_factor"] >= c["min_profit_factor"]
     )
 
