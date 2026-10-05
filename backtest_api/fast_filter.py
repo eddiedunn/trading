@@ -438,7 +438,7 @@ MIN_SHARPE = 0.8
 _EULER_GAMMA = 0.5772156649015329
 
 
-def expected_max_sharpe(attempts: int, years: float) -> float:
+def expected_max_sharpe(attempts: float, years: float) -> float:
     """Annualised Sharpe the best of ``attempts`` zero-edge strategies is expected to show.
 
     Uses the expected maximum of N independent standard normals,
@@ -449,7 +449,9 @@ def expected_max_sharpe(attempts: int, years: float) -> float:
     Management, 2014), eq. for SR_0 with V[SR] set to the zero-edge sampling
     variance. A zero-edge strategy's annualised Sharpe estimated over ``years``
     has standard error ~ 1/sqrt(years), so the noise bar is E[max Z_N]/sqrt(years).
-    Returns 0 for attempts <= 1. Increasing in attempts, decreasing in years.
+    Returns 0 for attempts <= 1. Non-decreasing in attempts, decreasing in years.
+    ``attempts`` may be fractional (revisions count as part of a trial); the
+    approximation dips below zero just above N=1, so it is floored at 0.
     """
     if attempts <= 1:
         return 0.0
@@ -458,7 +460,7 @@ def expected_max_sharpe(attempts: int, years: float) -> float:
     n = float(attempts)
     inv = NormalDist().inv_cdf
     e_max = (1 - _EULER_GAMMA) * inv(1 - 1 / n) + _EULER_GAMMA * inv(1 - 1 / (n * math.e))
-    return e_max / math.sqrt(years)
+    return max(0.0, e_max) / math.sqrt(years)
 
 
 def required_sharpe(attempts: int, years: float, benchmark_sharpe: float) -> float:

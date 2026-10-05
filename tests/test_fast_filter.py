@@ -769,3 +769,10 @@ def generate_signals(df):
 ''')
         assert "error" not in r
         assert r["lookahead"] is False
+
+
+def test_expected_max_sharpe_never_negative_for_fractional_attempts():
+    from backtest_api.fast_filter import expected_max_sharpe
+    vals = [expected_max_sharpe(n, 2.3) for n in (1.0, 1.01, 1.25, 1.5, 2.0, 3.0)]
+    assert all(v >= 0 for v in vals)
+    assert vals == sorted(vals)

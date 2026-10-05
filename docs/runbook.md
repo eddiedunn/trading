@@ -168,7 +168,8 @@ may not have the `sqlite3` command):
 ssh tela podman exec -i backtest-api python - <<'EOF'
 import os, sqlite3
 c = sqlite3.connect(os.environ["TRADING_RESULTS_DIR"] + "/ledger.sqlite")
-print(c.execute("select campaign, count(distinct code_sha256) from attempts where phase = 1 group by campaign").fetchall())
+from backtest_api.ledger import attempt_counts
+print(attempt_counts("2026-04-06"))  # {"ideas", "versions", "effective"}; effective drives the Sharpe bar
 print(c.execute("select ts, strategy_name, passed from final_tests order by ts desc").fetchall())
 EOF
 ```

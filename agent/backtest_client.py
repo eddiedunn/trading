@@ -71,7 +71,8 @@ def phase1_feedback(result: dict) -> str:
     lines = [f"Phase 1 {'PASSED' if result.get('passed') else 'FAILED'} (gate: {PHASE1_GATE})."]
     if result.get("attempts") is not None:
         lines.append(
-            f"This was attempt {result['attempts']} in the campaign (distinct code reaching Phase 1); "
+            f"Campaign attempts so far: {result['attempts']} effective ({result.get('ideas')} ideas, "
+            f"{result.get('versions')} versions; a revision counts as a quarter of a new idea); "
             f"the Sharpe bar is now {_fmt(result.get('required_sharpe'))} and rises with every new attempt."
         )
     gate = stats.get("gate") or {}
