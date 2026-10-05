@@ -4,7 +4,7 @@ caches; the seed and feedback go in user turns."""
 from pathlib import Path
 
 from agent.backtest_client import PHASE1_GATE, PHASE2_GATE
-from agent.validate import ALLOWED_IMPORTS, MAX_PARAMS
+from agent.validate import ALLOWED_IMPORTS, EXEMPT_CLASS_ATTRS, MAX_PARAMS
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_PATH = _REPO_ROOT / "strategies" / "examples" / "EmaCross.py"
@@ -31,7 +31,9 @@ harness runs it and reports back.
 
 ## Data and venue
 - Pairs: BTC, ETH and SOL USDC perpetuals on Hyperliquid, 4h candles, history from about 2023-12.
-- Columns available in `df`: date, open, high, low, close, volume.
+- Columns in the `df` passed to `generate_signals`: timestamp, open, high, low, close, volume.
+  Freqtrade's `dataframe` names the time column `date` instead, so keep the logic to the price and
+  volume columns and both phases see the same thing.
 - Phase 1 charges a 0.045% taker fee per position change and a 0.01%/bar funding drag while in a position.
 - Phase 2 is Freqtrade with a 5% stoploss and a 2% trailing stop from config; Phase 1 has neither,
   so the two phases can disagree on the same logic. Keep the logic simple enough that both agree.
@@ -39,13 +41,23 @@ harness runs it and reports back.
 ## File format (one file serves every phase)
 - A module-level `generate_signals(df) -> pd.Series` returning a position per bar: 1 long, 0 flat,
   -1 short. Phase 1 shifts the series by one bar itself, so compute signals from the current bar's
-  values; never use shift with a negative period or any other look-ahead.
+  values and never look ahead.
 - A class named exactly as the strategy, deriving from `IStrategy`, with `populate_indicators`,
   `populate_entry_trend` and `populate_exit_trend`, timeframe "4h", INTERFACE_VERSION = 3.
   It must express the same entry and exit logic as `generate_signals`.
 - Import Freqtrade inside try/except ImportError exactly as in the example (Phase 1 has no Freqtrade).
 - Imports allowed: {sorted(ALLOWED_IMPORTS)}. No file, network, subprocess or os access.
-- At most {MAX_PARAMS} module-level numeric constants (UPPER_CASE = number). Those are your knobs.
+- At most {MAX_PARAMS} distinct tunable numbers in the whole file. Every numeric literal counts wherever it
+  appears: module constants (any case, annotated, tuple-unpacked, inside lists or tuples), arithmetic such as
+  `3*4`, and numbers written inline in functions and calls such as `rolling(20)`, `> 1.5` or
+  `ewm(span=200)`. A minus sign is part of the value. The same value used twice counts once. Exempt: 0, 1,
+  -1, and the values of these IStrategy class attributes: {", ".join(sorted(EXEMPT_CLASS_ATTRS))}.
+  `minimal_roi` values do count. Put your knobs in UPPER_CASE module constants and reuse them.
+- Look-ahead is rejected before backtesting. Banned: `shift`, `diff` or `pct_change` with a negative
+  period, or with a period that is not a plain non-negative number or a module constant holding one;
+  `rolling(..., center=True)`; `bfill()`, `backfill()` and `fillna(method="bfill")` (use `ffill()`).
+  Anything that uses the whole series at once, such as dividing by the column's overall max or mean,
+  or reading `iloc[-1]`, also looks ahead and is not allowed.
 - Shorts are optional; if you use them, set `can_short = True` and populate enter_short/exit_short.
 
 ## Gates

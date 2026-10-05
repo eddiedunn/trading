@@ -112,10 +112,19 @@ ssh trinity podman exec trading-postgres psql -U trading -d trading \
 `python -m agent run` asks Claude (through `claude -p`, so it uses the
 Claude subscription login, not an API key) for a strategy in the two-in-one format,
 checks it locally (parses, has `generate_signals` and the right class, imports
-only pandas/numpy/pandas_ta/freqtrade, at most 6 constants, no negative
-`shift`), posts it to Phase 1, and on failure sends the metrics back for a
+only pandas/numpy/pandas_ta/freqtrade, at most 6 distinct tunable numbers
+anywhere in the file, no look-ahead patterns), posts it to Phase 1, and on failure sends the metrics back for a
 revision. Phase 2 runs only after Phase 1 passes; Claude then sees in-sample
 and validation metrics but only pass/fail for the out-of-sample window.
+
+The number cap counts every numeric literal in the file (module constants of any
+case, tuples, inline `rolling(20)` or `> 1.5`, negatives as their own value),
+except 0, 1, -1 and the values of the Freqtrade boilerplate attributes listed in
+`EXEMPT_CLASS_ATTRS` in `agent/validate.py`; `minimal_roi` values do count. The
+look-ahead check rejects `shift`/`diff`/`pct_change` with a negative or
+non-constant period, `rolling(center=True)`, `bfill`/`backfill` and
+`fillna(method="bfill")`. Whole-series tricks (normalising by the full column)
+can't be seen in the source; the backtest server's prefix check covers those.
 
 ```bash
 ssh -N -L 8070:127.0.0.1:8070 tela &                 # the API only listens on tela's loopback

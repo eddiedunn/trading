@@ -13,7 +13,16 @@ NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")  # same rule as the backte
 ALLOWED_IMPORTS = {"pandas", "numpy", "pandas_ta", "freqtrade", "typing", "math"}
 BANNED_CALLS = {"exec", "eval", "compile", "open", "__import__", "breakpoint", "input"}
 
-MAX_PARAMS = 6  # module-level numeric constants; the overfitting guard
+MAX_PARAMS = 6  # distinct tunable numeric literals in the file; the overfitting guard
+EXEMPT_LITERALS = {0, 1, -1}
+# IStrategy class attributes Freqtrade needs or that config overrides (stoploss and the
+# trailing stop come from config/backtest.json); numbers in their values are not knobs.
+# minimal_roi is deliberately not here: the config does not override it, so its values tune exits.
+EXEMPT_CLASS_ATTRS = {
+    "INTERFACE_VERSION", "timeframe", "startup_candle_count", "can_short", "stoploss",
+    "trailing_stop", "trailing_stop_positive", "trailing_stop_positive_offset",
+    "trailing_only_offset_is_reached", "process_only_new_candles",
+}
 
 
 def strategy_name_from_code(code: str) -> str | None:
@@ -62,7 +71,19 @@ def _check_imports(tree: ast.AST) -> list[str]:
     return [f"Import of {m!r} is not allowed; use only {sorted(ALLOWED_IMPORTS)}" for m in sorted(bad)]
 
 
-def _check_calls(tree: ast.AST) -> list[str]:
+# Calls whose period argument reads the future when negative (pandas defaults are all 1).
+PERIOD_METHODS = {"shift", "diff", "pct_change"}
+BACKFILL_METHODS = {"bfill", "backfill"}
+
+
+def _check_calls(tree: ast.Module) -> list[str]:
+    """Banned builtins plus the look-ahead patterns that can be spotted in the source.
+
+    Full-series operations (normalising by the whole column's max/mean, iloc[-1]
+    broadcast to every bar, ...) cannot be caught statically; the backtest server
+    runs a behavioural prefix check for those, so it is not duplicated here.
+    """
+    constants = _module_constants(tree)
     problems = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -70,14 +91,67 @@ def _check_calls(tree: ast.AST) -> list[str]:
         func = node.func
         if isinstance(func, ast.Name) and func.id in BANNED_CALLS:
             problems.append(f"Call to {func.id}() is not allowed")
-        # df.shift(-n) reads the future; Phase 1 would reward it and live trading cannot do it.
-        if isinstance(func, ast.Attribute) and func.attr == "shift":
-            for arg in list(node.args) + [kw.value for kw in node.keywords if kw.arg == "periods"]:
-                if isinstance(arg, ast.UnaryOp) and isinstance(arg.op, ast.USub):
-                    problems.append("shift() with a negative period looks ahead; not allowed")
-                elif isinstance(arg, ast.Constant) and isinstance(arg.value, (int, float)) and arg.value < 0:
-                    problems.append("shift() with a negative period looks ahead; not allowed")
+        if not isinstance(func, ast.Attribute):
+            continue
+        method = func.attr
+        line = f"line {node.lineno}"
+        if method in PERIOD_METHODS:
+            args = list(node.args[:1]) + [kw.value for kw in node.keywords if kw.arg == "periods"]
+            for arg in args:
+                value = _period_value(arg, constants)
+                if value is None:
+                    problems.append(
+                        f"{line}: {method}() period must be a non-negative number or a module-level constant "
+                        f"holding one; anything else may look ahead")
+                elif value < 0:
+                    problems.append(f"{line}: {method}() with a negative period looks ahead; not allowed")
+        elif method == "rolling":
+            for kw in node.keywords:
+                if kw.arg == "center" and not (isinstance(kw.value, ast.Constant) and kw.value.value is False):
+                    problems.append(f"{line}: rolling(center=True) uses future bars; not allowed")
+        elif method in BACKFILL_METHODS:
+            problems.append(f"{line}: {method}() fills gaps from future bars; use ffill() instead")
+        elif method == "fillna":
+            for kw in node.keywords:
+                if kw.arg == "method" and isinstance(kw.value, ast.Constant) and kw.value.value in BACKFILL_METHODS:
+                    problems.append(f"{line}: fillna(method={kw.value.value!r}) fills from future bars; not allowed")
     return problems
+
+
+def _module_constants(tree: ast.Module) -> dict[str, float]:
+    """Module-level NAME = <number> bindings whose name is assigned nowhere else in the file."""
+    stores: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            stores[node.id] = stores.get(node.id, 0) + 1
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target, value = node.targets[0].id, _number(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            target, value = node.target.id, _number(node.value)
+        else:
+            continue
+        if value is not None and stores.get(target) == 1:
+            constants[target] = value
+    return constants
+
+
+def _number(node: ast.AST) -> float | None:
+    """The value of a numeric literal, including a unary minus; None for anything else."""
+    sign = 1
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = -1 if isinstance(node.op, ast.USub) else 1
+        node = node.operand
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return sign * node.value
+    return None
+
+
+def _period_value(arg: ast.AST, constants: dict[str, float]) -> float | None:
+    if isinstance(arg, ast.Name):
+        return constants.get(arg.id)
+    return _number(arg)
 
 
 def _check_generate_signals(tree: ast.Module) -> list[str]:
@@ -114,13 +188,45 @@ def _check_class(tree: ast.Module, name: str) -> list[str]:
 
 
 def _check_param_count(tree: ast.Module, max_params: int) -> list[str]:
-    """Count module-level UPPER_CASE = <number> constants — the strategy's knobs."""
-    count = 0
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, (int, float)) and not isinstance(node.value.value, bool):
-                if all(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
-                    count += 1
-    if count > max_params:
-        return [f"{count} tunable constants; keep it to {max_params} or fewer to limit overfitting"]
+    """Count distinct tunable numeric literals anywhere in the file — the strategy's knobs.
+
+    Every number counts wherever it appears: module constants of any case, annotated
+    or tuple-unpacked assignments, containers, arithmetic, and literals inline in
+    function bodies and call arguments (rolling(20), > 1.5, ewm(span=200)). A unary
+    minus is part of the value. Exempt: 0, 1 and -1 (signal values, axis, booleans as
+    ints) and the right-hand side of the Freqtrade boilerplate attributes in
+    EXEMPT_CLASS_ATTRS inside the IStrategy class.
+    """
+    exempt_nodes = set()
+    for cls in tree.body:
+        if isinstance(cls, ast.ClassDef) and _is_istrategy(cls):
+            for stmt in cls.body:
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else (
+                    [stmt.target] if isinstance(stmt, ast.AnnAssign) else [])
+                if targets and all(isinstance(t, ast.Name) and t.id in EXEMPT_CLASS_ATTRS for t in targets):
+                    exempt_nodes.update(id(n) for n in ast.walk(stmt))
+
+    seen: dict[float, int] = {}  # value -> first line
+    negated = set()
+    for node in ast.walk(tree):
+        if id(node) in exempt_nodes:
+            continue
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            value = _number(node)
+            if value is not None:
+                negated.add(id(node.operand))
+                seen.setdefault(value, node.lineno)
+            continue
+        if id(node) in negated:
+            continue
+        value = _number(node)
+        if value is not None:
+            seen.setdefault(value, node.lineno)
+    # ast.walk visits parents before children, so a negated operand is always marked first.
+    tunable = {v: line for v, line in seen.items() if v not in EXEMPT_LITERALS}
+    if len(tunable) > max_params:
+        listed = ", ".join(f"{v!r} (line {line})" for v, line in sorted(tunable.items(), key=lambda kv: kv[1]))
+        return [f"{len(tunable)} distinct tunable numbers; keep it to {max_params} or fewer to limit overfitting. "
+                f"Every numeric literal anywhere in the file counts except 0, 1 and -1 and the Freqtrade "
+                f"boilerplate attributes. Reuse values or drop parameters. Found: {listed}"]
     return []

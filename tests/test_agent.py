@@ -69,12 +69,128 @@ class TestValidate:
         assert any("looks ahead" in p for p in problems)
 
     def test_too_many_constants(self):
-        code = "A = 1\nB = 2\nC = 3\nD = 4\nE = 5\n" + GOOD  # plus FAST and SLOW = 7
-        assert any("tunable constants" in p for p in validate_strategy(code, "Good"))
+        code = "A = 1\nB = 2\nC = 3\nD = 4\nE = 5\n" + GOOD  # 2-5 plus 12, 26 and 100 = 7 (1 is exempt)
+        assert any("tunable numbers" in p for p in validate_strategy(code, "Good"))
         assert validate_strategy(code, "Good", max_params=7) == []
 
     def test_bad_name(self):
         assert any("identifier" in p for p in validate_strategy(GOOD, "Bad-Name"))
+
+    def test_example_file_itself_validates_clean(self):
+        assert validate_strategy(EXAMPLE, "EmaCross") == []
+
+
+# EmaCross carries three tunable numbers (12, 26 and minimal_roi's 100), so with
+# max_params=3 any one extra number pushes it over the cap.
+_SIGNAL_LINE = "    return (fast > slow).astype(int)"
+
+
+def _with_module_line(line):
+    return GOOD.replace("FAST = 12\n", f"FAST = 12\n{line}\n")
+
+
+def _with_signal_expr(expr):
+    return GOOD.replace(_SIGNAL_LINE, f"    extra = {expr}\n{_SIGNAL_LINE}")
+
+
+def _over_cap(code, max_params=3):
+    return [p for p in validate_strategy(code, "Good", max_params=max_params) if "tunable numbers" in p]
+
+
+class TestParamCap:
+    def test_example_is_at_three(self):
+        assert _over_cap(GOOD) == []
+
+    @pytest.mark.parametrize("line", [
+        "A1 = -0.05",
+        "A2: int = 7",
+        "A3 = 3 * 4",
+        "A4, A5 = 10, 20",
+        "lookback = 50",
+        "WINDOWS = (2, 3, 5, 8, 13, 21, 34, 55)",
+        "LEVELS = [7.5]",
+    ])
+    def test_module_level_bypasses_are_counted(self, line):
+        assert _over_cap(_with_module_line(line)), line
+
+    @pytest.mark.parametrize("expr", [
+        'df["close"].rolling(20).mean()',
+        'df["close"] > 1.5',
+        'df["close"].ewm(span=200).mean()',
+        'df["close"] * -3',
+    ])
+    def test_inline_literals_in_functions_are_counted(self, expr):
+        assert _over_cap(_with_signal_expr(expr)), expr
+
+    def test_eight_item_tuple_is_eight_knobs(self):
+        problems = _over_cap(_with_module_line("WINDOWS = (2, 3, 5, 8, 13, 21, 34, 55)"), max_params=6)
+        assert problems and problems[0].startswith("11 distinct tunable numbers")
+        assert "55 (line" in problems[0]
+
+    def test_exempt_values_and_reuse_do_not_count(self):
+        code = _with_signal_expr('df["close"].shift(1) * 0 + df["close"].rolling(FAST).mean() - 1 + 12 + -1')
+        assert _over_cap(code) == []
+
+    def test_negative_is_distinct_from_positive(self):
+        assert _over_cap(_with_signal_expr("-12")), "-12 is a different knob from 12"
+
+    def test_boilerplate_class_attrs_are_exempt(self):
+        code = GOOD.replace("startup_candle_count = SLOW * 3",
+                            "startup_candle_count = SLOW * 3\n    trailing_stop_positive = 0.02\n"
+                            "    trailing_stop_positive_offset = 0.03")
+        assert _over_cap(code) == []
+
+    def test_minimal_roi_is_not_exempt(self):
+        code = GOOD.replace('minimal_roi = {"0": 100}', 'minimal_roi = {"0": 100, "60": 0.04}')
+        assert _over_cap(code)
+
+    def test_problem_message_tells_claude_what_counts(self):
+        problems = _over_cap(_with_module_line("A4, A5 = 10, 20"))
+        assert "Every numeric literal anywhere in the file counts except 0, 1 and -1" in problems[0]
+        assert "10 (line" in problems[0] and "20 (line" in problems[0]
+
+
+class TestLookAhead:
+    @pytest.mark.parametrize("expr", [
+        'df["close"].shift(-1)',
+        'df["close"].shift(periods=-2)',
+        'df["close"].shift(BACK)',
+        'df["close"].shift(-FAST)',
+        'df["close"].shift(len(df) - 2000)',
+        'df["close"].shift(FAST - 30)',
+        'df["close"].diff(-1)',
+        'df["close"].diff(periods=-3)',
+        'df["close"].pct_change(-1)',
+        'df["close"].pct_change(periods=-4)',
+        'df["close"].rolling(FAST, center=True).mean()',
+        'df["close"].bfill()',
+        'df["close"].backfill()',
+        'df["close"].fillna(method="bfill")',
+        'df["close"].fillna(method="backfill")',
+    ])
+    def test_rejected(self, expr):
+        code = _with_module_line("BACK = -1").replace(
+            _SIGNAL_LINE, f"    extra = {expr}\n{_SIGNAL_LINE}")
+        problems = validate_strategy(code, "Good", max_params=20)
+        assert any("look" in p or "future" in p for p in problems), (expr, problems)
+
+    @pytest.mark.parametrize("expr", [
+        'df["close"].shift()',
+        'df["close"].shift(1)',
+        'df["close"].shift(FAST)',
+        'df["close"].shift(periods=SLOW)',
+        'df["close"].diff()',
+        'df["close"].pct_change(FAST)',
+        'df["close"].rolling(FAST, center=False).mean()',
+        'df["close"].ffill()',
+        'df["close"].fillna(0)',
+    ])
+    def test_allowed(self, expr):
+        assert validate_strategy(_with_signal_expr(expr), "Good", max_params=20) == []
+
+    def test_constant_reassigned_elsewhere_is_not_trusted(self):
+        code = GOOD.replace(_SIGNAL_LINE, f"    FAST = -1\n    extra = df.shift(FAST)\n{_SIGNAL_LINE}")
+        assert any("shift() period" in p for p in validate_strategy(code, "Good", max_params=20))
 
 
 class TestFeedback:
@@ -121,6 +237,11 @@ class TestLLM:
         text = system_prompt()
         assert "class EmaCross(IStrategy)" in text
         assert "Do not tune to the reported numbers" in text
+        assert "timestamp, open, high, low, close, volume" in text
+        assert "date, open" not in text
+        assert "At most 6 distinct tunable numbers" in text
+        for banned in ("rolling(..., center=True)", "bfill()", "pct_change"):
+            assert banned in text
 
     @staticmethod
     def _cli_reply(text="```python\nx = 1\n```", **extra):
