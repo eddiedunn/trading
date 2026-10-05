@@ -69,48 +69,58 @@ def meets_promotion_criteria(metrics: dict) -> bool:
     )
 
 
+def _poll(instances: list[PaperInstance], db_url: str | None) -> list[dict]:
+    """Collect metrics from every instance once and store the snapshot."""
+    all_metrics = []
+    for inst in instances:
+        try:
+            all_metrics.append(collect_metrics(inst))
+        except Exception as e:
+            print(f"  Warning: failed to collect metrics from {inst.strategy_name}: {e}")
+    if db_url and all_metrics:
+        _write_metrics_snapshot(all_metrics, db_url)
+    return all_metrics
+
+
+def best_candidate(all_metrics: list[dict]) -> dict | None:
+    """The highest profit factor among metrics that meet the criteria, or None."""
+    candidates = [m for m in all_metrics if meets_promotion_criteria(m)]
+    return max(candidates, key=lambda m: m["profit_factor"]) if candidates else None
+
+
 def run_paper_arena(
     instances: list[PaperInstance],
     eval_days: int = EVAL_WINDOW_DAYS,
     db_url: str | None = None,
-) -> dict | None:
+) -> list[dict]:
     """
-    Poll all paper instances every hour for eval_days.
-    Return the best performer that meets criteria, or None.
+    Poll all paper instances every hour for eval_days, then poll once more.
+
+    Returns the metrics from that last poll. Only the last poll decides who
+    passes: a strategy that met the bar mid-window and has since fallen below
+    it is not a candidate. The promotion line is printed from the same metrics.
     """
     deadline = time.time() + eval_days * 86400
-    best = None
 
     while time.time() < deadline:
-        all_metrics = []
-        for inst in instances:
-            try:
-                all_metrics.append(collect_metrics(inst))
-            except Exception as e:
-                print(f"  Warning: failed to collect metrics from {inst.strategy_name}: {e}")
-
-        if db_url and all_metrics:
-            _write_metrics_snapshot(all_metrics, db_url)
-
-        candidates = [m for m in all_metrics if meets_promotion_criteria(m)]
-        if candidates:
-            best = max(candidates, key=lambda m: m["profit_factor"])
+        leader = best_candidate(_poll(instances, db_url))
+        if leader:
             print(
-                f"  -> Promotion candidate: {best['strategy']} "
-                f"PF={best['profit_factor']:.2f} "
-                f"WR={best['win_rate']:.1%} "
-                f"Return={best['profit_pct']:.1f}%"
+                f"  -> Meets criteria at this poll: {leader['strategy']} "
+                f"PF={leader['profit_factor']:.2f} "
+                f"WR={leader['win_rate']:.1%} "
+                f"Return={leader['profit_pct']:.1f}%"
             )
-
         time.sleep(POLL_INTERVAL_SECS)
 
-    if best and meets_promotion_criteria(best):
+    final = _poll(instances, db_url)
+    best = best_candidate(final)
+    if best:
         print(
             f"PROMOTION CANDIDATE: {best['strategy']} — "
             f"run `python -m live.trading_client promote --strategy {best['strategy']}` to activate"
         )
-
-    return best
+    return final
 
 
 def _write_metrics_snapshot(all_metrics: list[dict], db_url: str):
@@ -227,13 +237,12 @@ def run_cohort(db_url: str, names: list[str], eval_days: int = EVAL_WINDOW_DAYS)
         for inst in instances:
             if not wait_until_ready(inst):
                 print(f"  Warning: {inst.container_name} did not answer /api/v1/ping in time")
-        run_paper_arena(instances, eval_days=eval_days, db_url=db_url)
+        final = {m["strategy"]: m for m in run_paper_arena(instances, eval_days=eval_days, db_url=db_url)}
         for inst in instances:
-            try:
-                passed = meets_promotion_criteria(collect_metrics(inst))
-            except Exception as e:
-                print(f"  Warning: final metrics failed for {inst.strategy_name}: {e}")
-                passed = False
+            metrics = final.get(inst.strategy_name)
+            if metrics is None:
+                print(f"  Warning: no final metrics for {inst.strategy_name}; recording a fail")
+            passed = metrics is not None and meets_promotion_criteria(metrics)
             _record_result(db_url, inst.strategy_name, passed)
     finally:
         for inst in instances:

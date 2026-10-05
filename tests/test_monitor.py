@@ -13,6 +13,7 @@ from paper.monitor import (
     collect_metrics,
     meets_promotion_criteria,
     run_paper_arena,
+    best_candidate,
     _write_metrics_snapshot,
     PROMOTION_CRITERIA,
 )
@@ -358,163 +359,101 @@ class TestWriteMetricsSnapshot:
         mock_conn.close.assert_called_once()
 
 
+def _m(strategy, **kw):
+    base = {"strategy": strategy, "trade_count": 30, "profit_pct": 10.0,
+            "max_drawdown": -10.0, "win_rate": 0.50, "profit_factor": 1.5}
+    return {**base, **kw}
+
+
+FAILING = {"trade_count": 5, "profit_pct": 2.0, "max_drawdown": -20.0, "profit_factor": 1.1}
+
+
 class TestRunPaperArena:
-    """Test the main evaluation loop."""
+    """Test the main evaluation loop. One time.time() call sets the deadline,
+    then one per loop check; after the loop comes one final poll."""
+
+    S1 = PaperInstance("Strat1", 8090, "paper_strat1_0", "paper_strat1")
+    S2 = PaperInstance("Strat2", 8091, "paper_strat2_1", "paper_strat2")
 
     @patch("paper.monitor.time.time")
     @patch("paper.monitor.time.sleep")
     @patch("paper.monitor.collect_metrics")
-    def test_run_paper_arena_finds_best(self, mock_collect, mock_sleep, mock_time):
-        """Find best performer meeting criteria."""
-        instance1 = PaperInstance(
-            strategy_name="Strat1",
-            port=8090,
-            container_name="paper_strat1_0",
-            db_schema="paper_strat1",
-        )
-        instance2 = PaperInstance(
-            strategy_name="Strat2",
-            port=8091,
-            container_name="paper_strat2_1",
-            db_schema="paper_strat2",
-        )
-
-        # Time sequence: initial deadline calc, loop condition check (true), loop condition check (false)
+    def test_promotes_best_of_final_poll(self, mock_collect, mock_sleep, mock_time, capsys):
         mock_time.side_effect = [0, 0, 100]
-
-        # Both instances pass criteria on first poll
         mock_collect.side_effect = [
-            {
-                "strategy": "Strat1",
-                "trade_count": 25,
-                "profit_pct": 8.0,
-                "max_drawdown": -12.0,
-                "win_rate": 0.48,
-                "profit_factor": 1.3,
-            },
-            {
-                "strategy": "Strat2",
-                "trade_count": 30,
-                "profit_pct": 10.0,
-                "max_drawdown": -10.0,
-                "win_rate": 0.50,
-                "profit_factor": 1.5,
-            },
+            _m("Strat1", profit_factor=1.3), _m("Strat2"),  # in-loop poll
+            _m("Strat1", profit_factor=1.3), _m("Strat2"),  # final poll
         ]
 
-        best = run_paper_arena([instance1, instance2], eval_days=0.00001)
+        final = run_paper_arena([self.S1, self.S2], eval_days=0.00001)
 
-        assert best is not None
-        assert best["strategy"] == "Strat2"
-        assert best["profit_factor"] == 1.5
+        assert [m["strategy"] for m in final] == ["Strat1", "Strat2"]
+        assert "PROMOTION CANDIDATE: Strat2" in capsys.readouterr().out
 
     @patch("paper.monitor.time.time")
     @patch("paper.monitor.time.sleep")
     @patch("paper.monitor.collect_metrics")
-    def test_run_paper_arena_no_candidates(self, mock_collect, mock_sleep, mock_time):
-        """Return None if no instance meets criteria."""
-        instance = PaperInstance(
-            strategy_name="Strat",
-            port=8090,
-            container_name="paper_strat_0",
-            db_schema="paper_strat",
-        )
-
-        # Time sequence: initial calc, loop check (true), loop check (false)
+    def test_no_candidates(self, mock_collect, mock_sleep, mock_time, capsys):
         mock_time.side_effect = [0, 0, 100]
+        mock_collect.side_effect = [_m("Strat1", **FAILING), _m("Strat1", **FAILING)]
 
-        # Instance fails criteria
+        final = run_paper_arena([self.S1], eval_days=0.00001)
+
+        assert best_candidate(final) is None
+        assert "PROMOTION" not in capsys.readouterr().out
+
+    @patch("paper.monitor.time.time")
+    @patch("paper.monitor.time.sleep")
+    @patch("paper.monitor.collect_metrics")
+    def test_passes_mid_run_but_fails_at_end_is_not_promoted(self, mock_collect, mock_sleep, mock_time, capsys):
+        """A strategy that met the bar mid-window and fell below it is not promoted."""
+        mock_time.side_effect = [0, 0, 1500, 3000]
         mock_collect.side_effect = [
-            {
-                "strategy": "Strat",
-                "trade_count": 5,  # too low
-                "profit_pct": 2.0,  # too low
-                "max_drawdown": -20.0,
-                "win_rate": 0.40,
-                "profit_factor": 1.1,
-            },
+            _m("Strat1"),                 # poll 1: passes
+            _m("Strat1", profit_pct=1.0),  # poll 2: below the bar
+            _m("Strat1", profit_pct=1.0),  # final poll: still below
         ]
 
-        best = run_paper_arena([instance], eval_days=0.00001)
+        final = run_paper_arena([self.S1], eval_days=2500 / 86400)
 
-        assert best is None
+        assert best_candidate(final) is None
+        assert meets_promotion_criteria(final[0]) is False
+        out = capsys.readouterr().out
+        assert "PROMOTION CANDIDATE" not in out
+        assert "promote --strategy" not in out
 
     @patch("paper.monitor.time.time")
     @patch("paper.monitor.time.sleep")
     @patch("paper.monitor.collect_metrics")
     @patch("paper.monitor._write_metrics_snapshot")
-    def test_run_paper_arena_writes_metrics_to_db(self, mock_write, mock_collect, mock_sleep, mock_time):
-        """Write metrics to DB if db_url provided."""
-        instance = PaperInstance(
-            strategy_name="Strat",
-            port=8090,
-            container_name="paper_strat_0",
-            db_schema="paper_strat",
-        )
-
+    def test_writes_every_poll_to_db(self, mock_write, mock_collect, mock_sleep, mock_time):
         mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = [
-            {
-                "strategy": "Strat",
-                "trade_count": 25,
-                "profit_pct": 8.0,
-                "max_drawdown": -12.0,
-                "win_rate": 0.48,
-                "profit_factor": 1.3,
-            },
-        ]
+        mock_collect.side_effect = [_m("Strat1"), _m("Strat1")]
 
-        run_paper_arena([instance], eval_days=0.00001, db_url="postgresql://localhost/trading")
+        run_paper_arena([self.S1], eval_days=0.00001, db_url="postgresql://localhost/trading")
 
-        # Verify snapshot write was called
-        mock_write.assert_called()
+        assert mock_write.call_count == 2
 
     @patch("paper.monitor.time.time")
     @patch("paper.monitor.time.sleep")
     @patch("paper.monitor.collect_metrics")
-    def test_run_paper_arena_handles_collection_error(self, mock_collect, mock_sleep, mock_time):
-        """Handle errors during metric collection gracefully."""
-        instance = PaperInstance(
-            strategy_name="Strat",
-            port=8090,
-            container_name="paper_strat_0",
-            db_schema="paper_strat",
-        )
-
+    def test_handles_collection_error(self, mock_collect, mock_sleep, mock_time):
         mock_time.side_effect = [0, 0, 100]
         mock_collect.side_effect = Exception("Connection failed")
 
-        # Should not raise, returns None
-        best = run_paper_arena([instance], eval_days=0.00001)
-
-        assert best is None
+        assert run_paper_arena([self.S1], eval_days=0.00001) == []
 
     @patch("paper.monitor.time.time")
     @patch("paper.monitor.time.sleep")
     @patch("paper.monitor.collect_metrics")
-    def test_run_paper_arena_respects_deadline(self, mock_collect, mock_sleep, mock_time):
-        """Loop stops when deadline passed."""
-        instance = PaperInstance(
-            strategy_name="Strat",
-            port=8090,
-            container_name="paper_strat_0",
-            db_schema="paper_strat",
-        )
-
-        # Time sequence: initial calc=0, check1=0 (0 < 2500=deadline), check2=1500 (1500 < 2500), check3=3000 (3000 < 2500 is False)
-        # With eval_days = 2500/86400 ≈ 0.0289, deadline = 0 + 2500/86400*86400 = 2500
+    def test_respects_deadline(self, mock_collect, mock_sleep, mock_time):
+        """Deadline 2500s: loop polls at t=0 and t=1500, stops at t=3000, then polls once more."""
         mock_time.side_effect = [0, 0, 1500, 3000]
-        mock_collect.side_effect = [
-            {"strategy": "Strat", "trade_count": 10, "profit_pct": 2.0,
-             "max_drawdown": -20.0, "win_rate": 0.40, "profit_factor": 1.1},
-            {"strategy": "Strat", "trade_count": 20, "profit_pct": 5.0,
-             "max_drawdown": -15.0, "win_rate": 0.45, "profit_factor": 1.2},
-        ]
+        mock_collect.side_effect = [_m("Strat1", **FAILING)] * 3
 
-        run_paper_arena([instance], eval_days=2500/86400)
+        run_paper_arena([self.S1], eval_days=2500 / 86400)
 
-        # Should have looped twice, then exited on third time check
-        assert mock_collect.call_count == 2
+        assert mock_collect.call_count == 3
 
 
 class TestQueue:
@@ -560,31 +499,57 @@ class TestRunCohort:
     @patch("paper.monitor.teardown_paper_instance")
     @patch("paper.monitor._record_result")
     @patch("paper.monitor._mark_started")
-    @patch("paper.monitor.collect_metrics")
     @patch("paper.monitor.run_paper_arena")
     @patch("paper.monitor.wait_until_ready", return_value=True)
     @patch("paper.monitor.spawn_paper_instance")
     def test_records_each_outcome_and_tears_down(
-        self, mock_spawn, mock_ready, mock_arena, mock_collect, mock_started, mock_record, mock_teardown
+        self, mock_spawn, mock_ready, mock_arena, mock_started, mock_record, mock_teardown
     ):
         from paper.monitor import run_cohort
 
         a = PaperInstance("Good", 8090, "paper_good_0", "paper_good")
         b = PaperInstance("Bad", 8091, "paper_bad_1", "paper_bad")
-        mock_spawn.side_effect = [a, b]
-        good = {"trade_count": 30, "profit_pct": 10.0, "max_drawdown": -5.0, "win_rate": 0.5, "profit_factor": 1.5}
-        mock_collect.side_effect = [good, {**good, "profit_factor": 0.5}]
+        c = PaperInstance("Gone", 8092, "paper_gone_2", "paper_gone")
+        mock_spawn.side_effect = [a, b, c]
+        # "Gone" answered no final poll, so it has no metrics.
+        mock_arena.return_value = [_m("Good"), _m("Bad", profit_factor=0.5)]
 
-        run_cohort("postgresql://x", ["Good", "Bad"], eval_days=14)
+        run_cohort("postgresql://x", ["Good", "Bad", "Gone"], eval_days=14)
 
-        assert mock_spawn.call_args_list == [call("Good", 0), call("Bad", 1)]
-        mock_started.assert_called_once_with("postgresql://x", ["Good", "Bad"])
-        mock_arena.assert_called_once_with([a, b], eval_days=14, db_url="postgresql://x")
+        assert mock_spawn.call_args_list == [call("Good", 0), call("Bad", 1), call("Gone", 2)]
+        mock_started.assert_called_once_with("postgresql://x", ["Good", "Bad", "Gone"])
+        mock_arena.assert_called_once_with([a, b, c], eval_days=14, db_url="postgresql://x")
         assert mock_record.call_args_list == [
             call("postgresql://x", "Good", True),
             call("postgresql://x", "Bad", False),
+            call("postgresql://x", "Gone", False),
         ]
-        assert mock_teardown.call_count == 2
+        assert mock_teardown.call_count == 3
+
+    @patch("paper.monitor.teardown_paper_instance")
+    @patch("paper.monitor._record_result")
+    @patch("paper.monitor._mark_started")
+    @patch("paper.monitor._write_metrics_snapshot")
+    @patch("paper.monitor.collect_metrics")
+    @patch("paper.monitor.time.sleep")
+    @patch("paper.monitor.time.time")
+    @patch("paper.monitor.wait_until_ready", return_value=True)
+    @patch("paper.monitor.spawn_paper_instance")
+    def test_mid_run_pass_then_end_fail_records_fail_and_prints_no_promotion(
+        self, mock_spawn, mock_ready, mock_time, mock_sleep, mock_collect, mock_write,
+        mock_started, mock_record, mock_teardown, capsys,
+    ):
+        """Printed line and recorded result both come from the final poll."""
+        from paper.monitor import run_cohort
+
+        mock_spawn.return_value = PaperInstance("Fader", 8090, "paper_fader_0", "paper_fader")
+        mock_time.side_effect = [0, 0, 100]
+        mock_collect.side_effect = [_m("Fader"), _m("Fader", **FAILING)]
+
+        run_cohort("postgresql://x", ["Fader"], eval_days=0.00001)
+
+        mock_record.assert_called_once_with("postgresql://x", "Fader", False)
+        assert "PROMOTION CANDIDATE" not in capsys.readouterr().out
 
     @patch("paper.monitor.teardown_paper_instance")
     @patch("paper.monitor._mark_started")
