@@ -321,9 +321,6 @@ volumes:
   "timeframe": "4h",
   "dry_run": true,
   "dry_run_wallet": 100,
-  "stoploss": -0.05,
-  "trailing_stop": true,
-  "trailing_stop_positive": 0.02,
   "entry_pricing": {
     "price_side": "same",
     "use_order_book": true,
@@ -710,9 +707,6 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
         "pair_whitelist": ["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"],
         "dry_run": True,
         "dry_run_wallet": 100,
-        "stoploss": -0.05,
-        "trailing_stop": True,
-        "trailing_stop_positive": 0.02,
         "db_url": f"postgresql://freqtrade:freqtrade@postgres:5432/freqtrade?options=-c search_path={db_schema}",
         "api_server": {
             "enabled": True,

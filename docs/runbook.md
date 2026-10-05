@@ -170,5 +170,8 @@ names and ports, so only one can run at a time.
 - Sibling Freqtrade containers run with `--userns=keep-id:uid=1000,gid=1000`,
   so their output files belong to the host user and the calling container can
   read them.
-- Phase 1 has no stoploss or trailing stop; Phase 2 uses `config/backtest.json`
-  (5% stop, 2% trailing). Expect the two to disagree on the same strategy.
+- Stops and ROI come from each strategy's class attributes (`stoploss`,
+  `minimal_roi`, `trailing_*`). The Freqtrade configs (`config/backtest.json`,
+  the paper config, the live template) must not set them, because config values
+  override the strategy's. Phase 1 has no stoploss, so a strategy with a tight
+  stop can still score differently in Phase 1 and Phase 2.

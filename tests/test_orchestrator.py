@@ -110,13 +110,13 @@ class TestBuildPaperConfig:
         assert "testnet" in urls["private"]
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
-    def test_config_stoploss(self):
-        """Config has trailing stop loss settings."""
+    def test_config_leaves_exits_to_the_strategy(self):
+        """Config values override strategy attributes, so the config sets no stop or ROI."""
+        from tests.test_configs import STRATEGY_EXIT_KEYS
+
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
-        assert cfg["stoploss"] == -0.05
-        assert cfg["trailing_stop"] is True
-        assert cfg["trailing_stop_positive"] == 0.02
+        assert STRATEGY_EXIT_KEYS.isdisjoint(cfg)
 
 
 class TestPaperInstance:
