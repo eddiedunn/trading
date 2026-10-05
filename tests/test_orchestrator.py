@@ -57,10 +57,10 @@ class TestBuildPaperConfig:
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_stake_settings(self):
-        """Config has correct stake amount and max trades."""
+        """The wallet is split across all three trade slots, so each can be funded."""
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
-        assert cfg["stake_amount"] == 33
+        assert cfg["stake_amount"] == "unlimited"
         assert cfg["max_open_trades"] == 3
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
@@ -386,3 +386,26 @@ class TestArchiveOldTrades:
     def test_nothing_to_archive(self, tmp_path):
         assert archive_old_trades(tmp_path) is None
         assert list(tmp_path.iterdir()) == []
+
+
+class TestComparisonConfig:
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme", "TRADING_ENV": "testnet"})
+    def test_matches_paper_trading_settings(self):
+        from paper.orchestrator import build_comparison_config
+
+        paper = _build_paper_config("TestStrat", 8090, "paper_teststrat")
+        bt = build_comparison_config()
+
+        for key in ("stake_amount", "max_open_trades", "dry_run_wallet", "timeframe",
+                    "trading_mode", "margin_mode", "stake_currency", "pairlists"):
+            assert bt[key] == paper[key], key
+        assert bt["exchange"]["pair_whitelist"] == paper["exchange"]["pair_whitelist"]
+        # mainnet candles, no API server or trade DB
+        assert "urls" not in bt["exchange"]["ccxt_config"]
+        assert "api_server" not in bt and "db_url" not in bt
+
+    def test_sets_no_exits(self):
+        from paper.orchestrator import build_comparison_config
+        from tests.test_configs import STRATEGY_EXIT_KEYS
+
+        assert STRATEGY_EXIT_KEYS.isdisjoint(build_comparison_config())

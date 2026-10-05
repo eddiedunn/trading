@@ -13,6 +13,7 @@ Network=host
 Volume={{ paper_arena_dir }}:{{ paper_arena_dir }}:Z
 Volume={{ podman_socket }}:/run/podman/podman.sock
 Environment=TRADING_PAPER_DIR={{ paper_arena_dir }}
+Environment=TRADING_PAPER_FT_DATA_DIR={{ paper_arena_ftdata_dir }}
 Environment=POSTGRES_HOST=127.0.0.1
 Environment=POSTGRES_PORT={{ trading_postgres_port }}
 Environment=POSTGRES_DB={{ trading_postgres_db }}

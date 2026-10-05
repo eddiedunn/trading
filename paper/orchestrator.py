@@ -148,23 +148,22 @@ _TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
 PAIRS = ["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"]
 
 
-def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
-    """Build Freqtrade config for a paper instance."""
-    exchange: dict = {
-        "name": "hyperliquid",
-        "ccxt_config": {"options": {"defaultType": "swap"}},
-        "pair_whitelist": PAIRS,
-    }
-    if os.environ.get("TRADING_ENV") == "testnet":
-        exchange["ccxt_config"]["urls"] = {
-            "api": {"public": _TESTNET_API_URL, "private": _TESTNET_API_URL}
-        }
+def _base_config() -> dict:
+    """Settings shared by the paper instance and its comparison backtest.
+
+    ``stake_amount: unlimited`` splits the wallet evenly across free trade slots,
+    so all ``max_open_trades`` positions can be funded from the 100 USDC wallet.
+    """
     return {
-        "exchange": exchange,
+        "exchange": {
+            "name": "hyperliquid",
+            "ccxt_config": {"options": {"defaultType": "swap"}},
+            "pair_whitelist": list(PAIRS),
+        },
         "trading_mode": "futures",
         "margin_mode": "isolated",
         "stake_currency": "USDC",
-        "stake_amount": 33,
+        "stake_amount": "unlimited",
         "max_open_trades": 3,
         "timeframe": "4h",
         "dry_run": True,
@@ -172,11 +171,22 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
         "pairlists": [{"method": "StaticPairList"}],
         "entry_pricing": {"price_side": "same"},
         "exit_pricing": {"price_side": "same"},
+        # No stoploss, trailing_* or minimal_roi: config values override the
+        # strategy's own, and each strategy declares its exits.
+    }
+
+
+def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
+    """Build Freqtrade config for a paper instance."""
+    config = _base_config()
+    if os.environ.get("TRADING_ENV") == "testnet":
+        config["exchange"]["ccxt_config"]["urls"] = {
+            "api": {"public": _TESTNET_API_URL, "private": _TESTNET_API_URL}
+        }
+    config.update({
         # Keep the dry-run trade history next to the logs so it survives restarts.
         "db_url": "sqlite:////freqtrade/logs/tradesv3.dryrun.sqlite",
         "initial_state": "running",
-        # No stoploss, trailing_* or minimal_roi: config values override the
-        # strategy's own, and each strategy declares its exits.
         "api_server": {
             "enabled": True,
             "listen_ip_address": "0.0.0.0",
@@ -185,4 +195,14 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
             "password": os.environ["FREQTRADE_API_PASSWORD"],
             "jwt_secret_key": secrets.token_hex(32),
         },
-    }
+    })
+    return config
+
+
+def build_comparison_config() -> dict:
+    """Freqtrade backtest config matching the paper config: same pairs, stake rule and wallet.
+
+    Fees are not pinned in either config, so both use the exchange's market fee.
+    The candles are mainnet history, so no testnet URLs here.
+    """
+    return _base_config()

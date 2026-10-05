@@ -6,3 +6,8 @@ paper_arena_image: localhost/trading-paper-monitor:latest
 # path inside the monitor so paths handed to sibling Freqtrade containers
 # resolve on the host.
 paper_arena_dir: /data/services/trading/paper
+
+# Hyperliquid history in Freqtrade's futures layout, for the backtest the monitor
+# runs over each finished paper period. Must sit inside paper_arena_dir, which is
+# the only directory mounted into the monitor.
+paper_arena_ftdata_dir: "{{ paper_arena_dir }}/ftdata"
