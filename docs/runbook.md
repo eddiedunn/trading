@@ -12,7 +12,7 @@ run from the Mac (`make deploy`) because the playbooks read secrets from gopass.
 |---|---|---|---|
 | tela | `backtest-api.service` | 127.0.0.1:8070 | `POST /backtest` — Phase 1 numpy filter, Phase 2 Freqtrade periods, final test (phase 3) |
 | trinity | `trading-postgres.service` | 127.0.0.1:5432 | `strategy_registry`, `paper_snapshots` |
-| trinity | `paper-arena-monitor.service` | host network | Runs queued strategies as Freqtrade dry-run containers for 14 days, snapshots hourly |
+| trinity | `paper-arena-monitor.service` | host network | Runs queued strategies as Freqtrade dry-run containers until 30 closed trades or 60 days, snapshots hourly |
 | trinity | `paper_<name>_<slot>` containers | 127.0.0.1:8090–8095 | One Freqtrade dry-run per paper candidate, started by the monitor |
 | trinity | `trading-live.service` | 127.0.0.1:8080 | The live Freqtrade bot. **Dry-run by default**, strategy `NullStrategy` until promoted |
 
@@ -102,7 +102,7 @@ count and allows a new final test for every strategy.
 | Phase 1 | 1 | development | agent or human | floors on return, drawdown, profit factor, trades; Sharpe above a bar that rises with the campaign's attempt count; Sharpe above buy-and-hold |
 | Phase 2 | 2 | development, three periods | agent or human | every period: profit factor >= 1.2, drawdown >= -25% |
 | Final test | 3 | held back | human only (`submit_strategy.sh`) | see `backtest_api/final_test.py` |
-| Paper | — | live market, 14 days | paper arena | `strategy_registry.paper_passed` |
+| Paper | — | live market, 30 closed trades or 60 days | paper arena | `strategy_registry.paper_passed` |
 
 The API refuses the final test (HTTP 409) unless this exact code passed
 Phase 2 in the current campaign, and refuses a second final test for the same
@@ -154,8 +154,17 @@ given `--force`. With `--force` the script carries on past a failed phase, but
 still skips the final test unless Phase 2 passed.
 
 The monitor checks the queue every 5 minutes and runs everything queued (up to
-6) as one cohort for 14 days. A monitor restart re-queues the running cohort and
-its 14 days start over. Outcomes land in `strategy_registry.paper_passed`.
+6) as one cohort. Each strategy runs until 30 closed trades or 60 days. At the
+end the monitor backtests the same strategy over exactly the paper period on
+trinity (`paper/compare.py`) and passes it only if paper matched: trade count
+within 40% (or 3), return no more than max(2 points, half the backtest return)
+short, no trade worse than its stoploss minus 1 point, and profit factor at least
+0.8x the backtest's when the backtest has 10+ trades. Each run starts at zero
+trades (an earlier trade DB is moved to `logs/<strategy>/previous-<time>/`). A
+monitor restart re-queues the running cohort and its clock starts over.
+Outcomes land in `strategy_registry.paper_passed`; the full comparison is the
+`PAPER RESULT` line in the monitor log and
+`/data/services/trading/paper/compare/<strategy>/comparison-<range>.json`.
 
 Watch it:
 

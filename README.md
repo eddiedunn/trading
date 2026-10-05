@@ -55,7 +55,7 @@ docs/             Runbook, design, status
 
 Promotion from paper to live is **manual** — `paper/monitor.py` only logs a candidate; an operator must review and run the CLI.
 
-1. `paper/monitor.py` finishes its 14-day window and logs `PROMOTION CANDIDATE: <name> — run ...`.
+1. `paper/monitor.py` finishes a run (30 closed trades or 60 days), compares it with a backtest of the same period, and logs `PROMOTION CANDIDATE: <name> — run ...` if paper matched.
 2. Operator inspects `paper_snapshots` and the candidate strategy code.
 3. Promote: `python -m live.trading_client promote --strategy <name>` — copies the strategy into the live slot, writes `/opt/trading/live/active_strategy.txt`, and sets `promoted_live=true` / `promoted_at=now()` in `strategy_registry`. Restart the live bot to pick up the new strategy.
 4. `python -m live.trading_client status` — show currently promoted strategy + timestamp.
