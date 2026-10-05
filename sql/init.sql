@@ -43,3 +43,9 @@ CREATE INDEX IF NOT EXISTS idx_strategy_registry_name ON strategy_registry (name
 ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_queued_at   TIMESTAMPTZ;
 ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_started_at  TIMESTAMPTZ;
 ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS paper_finished_at TIMESTAMPTZ;
+
+-- Final test on the held-back data (added 2026-10). campaign is the holdout
+-- start date the strategy was tested against.
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS campaign          TEXT;
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS final_test_passed BOOLEAN;
+ALTER TABLE strategy_registry ADD COLUMN IF NOT EXISTS final_test_stats  JSONB;
