@@ -13,8 +13,13 @@ import pytest
 
 from backtest_api.fast_filter import (
     _compute_metrics,
-    _aggregate_metrics,
+    _portfolio_stats,
+    expected_max_sharpe,
+    floor_failures,
     meets_phase1_criteria,
+    phase1_gate,
+    portfolio_net_returns,
+    required_sharpe,
     run_fast_filter,
     TAKER_FEE,
     ASSUMED_FUNDING_PER_BAR,
@@ -118,92 +123,144 @@ class TestComputeMetrics:
         assert isinstance(m["trade_count"], int)
 
 
-class TestAggregateMetrics:
-    """Test cross-pair aggregation."""
+def _pair(pf=1.5, dd=-0.10):
+    return {"total_return": 0.1, "sharpe": 1.0, "max_drawdown": dd, "win_rate": 0.5,
+            "profit_factor": pf, "trade_count": 20, "calmar": 1.0}
 
-    def test_aggregation(self):
-        results = {
-            "BTC": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": -0.05,
-                     "win_rate": 0.50, "profit_factor": 1.5, "trade_count": 20, "calmar": 2.0},
-            "ETH": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": -0.10,
-                     "win_rate": 0.60, "profit_factor": 2.0, "trade_count": 30, "calmar": 3.0},
-        }
-        agg = _aggregate_metrics(results)
 
-        assert agg["total_return"] == pytest.approx(0.15, abs=0.001)
-        assert agg["sharpe"] == pytest.approx(1.25, abs=0.001)
-        assert agg["trade_count"] == 50
-        assert "per_pair" in agg
+class TestPortfolio:
+    """One combined account, equal weight, rebalanced every bar."""
 
-    def test_handles_inf_profit_factor(self):
-        """Infinite profit factor (no losses) should be excluded from average."""
-        results = {
-            "BTC": {"total_return": 0.10, "sharpe": 1.0, "max_drawdown": -0.05,
-                     "win_rate": 0.50, "profit_factor": float("inf"), "trade_count": 10, "calmar": 2.0},
-            "ETH": {"total_return": 0.20, "sharpe": 1.5, "max_drawdown": -0.10,
-                     "win_rate": 0.60, "profit_factor": 2.0, "trade_count": 20, "calmar": 3.0},
-        }
-        agg = _aggregate_metrics(results)
-        assert agg["profit_factor"] == pytest.approx(2.0, abs=0.001)
+    def test_net_return_is_mean_of_pairs_aligned_on_timestamp(self):
+        ts = pd.date_range("2025-01-01", periods=3, freq="4h", tz="UTC")
+        a = pd.Series([0.0, 0.02, -0.01], index=ts)
+        b = pd.Series([0.01, 0.04], index=ts[1:])  # starts one bar later
+        p = portfolio_net_returns({"A": a, "B": b})
+        assert p.tolist() == pytest.approx([0.0, 0.015, 0.015])
+
+    def test_headline_metrics_come_from_the_portfolio_not_averages(self):
+        ts = pd.date_range("2025-01-01", periods=4, freq="4h", tz="UTC")
+        # Pair A: +10% then -10%; pair B: -10% then +10%. Averaging per-pair stats would show
+        # a -1% return and -10% drawdown; the rebalanced account is flat throughout.
+        a = pd.Series([0.0, 0.10, -0.10, 0.0], index=ts)
+        b = pd.Series([0.0, -0.10, 0.10, 0.0], index=ts)
+        port = portfolio_net_returns({"A": a, "B": b})
+        stats = _portfolio_stats(port, pd.Series([0.05, -0.02, 0.03]))
+        assert stats["total_return"] == pytest.approx(0.0)
+        assert stats["max_drawdown"] == pytest.approx(0.0)
+        # trade stats are pooled across pairs
+        assert stats["trade_count"] == 3
+        assert stats["profit_factor"] == pytest.approx(4.0)
+        assert stats["win_rate"] == pytest.approx(0.6667, abs=1e-4)
+
+    def test_cagr_uses_timestamps(self):
+        ts = pd.date_range("2024-01-01", "2026-01-01", periods=101, tz="UTC")
+        port = pd.Series(0.0, index=ts)
+        port.iloc[1] = 0.21  # +21% over ~2 years
+        stats = _portfolio_stats(port, pd.Series(dtype=float))
+        assert stats["years"] == pytest.approx(2.0, abs=0.01)
+        assert stats["cagr"] == pytest.approx(0.10, abs=0.001)
+        assert stats["calmar"] == 0.0  # no drawdown
+
+    def test_pooled_profit_factor_inf_without_losses(self):
+        port = pd.Series([0.0, 0.01], index=pd.date_range("2025-01-01", periods=2, freq="4h", tz="UTC"))
+        assert _portfolio_stats(port, pd.Series([0.01, 0.02]))["profit_factor"] == float("inf")
+
+
+class TestFloor:
+    def test_all_pairs_pass(self):
+        assert floor_failures({"A": _pair(), "B": _pair(pf=1.0, dd=-0.34)}) == []
+
+    def test_reports_the_failing_pair(self):
+        f = floor_failures({"A": _pair(pf=3.0), "B": _pair(pf=0.9), "C": _pair(dd=-0.35)})
+        assert [(x["pair"], x["check"]) for x in f] == [("B", "profit_factor"), ("C", "max_drawdown")]
+        assert f[0]["value"] == 0.9 and f[0]["threshold"] == 1.0
+
+
+class TestRequiredSharpe:
+    def test_one_attempt_has_no_noise_bar(self):
+        assert expected_max_sharpe(1, 2.3) == 0.0
+        assert required_sharpe(1, 2.3, 0.0) == pytest.approx(0.8)
+
+    def test_rises_with_attempts(self):
+        vals = [required_sharpe(n, 2.3, 0.0) for n in (1, 2, 5, 10, 100, 1000)]
+        assert all(b > a for a, b in zip(vals, vals[1:]))
+
+    def test_falls_with_more_years(self):
+        assert required_sharpe(10, 4.0, 0.0) < required_sharpe(10, 1.0, 0.0)
+
+    def test_floored_at_0_8(self):
+        assert required_sharpe(1, 2.3, -1.5) == pytest.approx(0.8)
+        assert required_sharpe(10, 2.3, 0.2) == pytest.approx(0.8 + expected_max_sharpe(10, 2.3))
+
+    def test_respects_the_benchmark(self):
+        assert required_sharpe(1, 2.3, 1.4) == pytest.approx(1.4)
+        assert required_sharpe(10, 2.3, 1.4) == pytest.approx(1.4 + expected_max_sharpe(10, 2.3))
+
+    def test_matches_expected_max_of_normals(self):
+        # E[max of 10 standard normals] is 1.5388; the Bailey & Lopez de Prado form is close.
+        assert expected_max_sharpe(10, 1.0) == pytest.approx(1.5388, abs=0.05)
+
+
+def _passing_stats(**overrides):
+    stats = {
+        "cagr": 0.25, "total_return": 0.60, "max_drawdown": -0.15, "profit_factor": 1.5,
+        "win_rate": 0.55, "trade_count": 50, "sharpe": 1.2, "years": 2.3,
+        "benchmark": {"total_return": 0.5, "sharpe": 0.6, "max_drawdown": -0.5},
+        "floor_failures": [], "lookahead": False,
+    }
+    stats.update(overrides)
+    return stats
 
 
 class TestPhase1Criteria:
     """Test the gate function."""
 
     def test_passing(self):
-        stats = {
-            "total_return": 0.30,
-            "max_drawdown": -0.15,
-            "profit_factor": 1.5,
-            "win_rate": 0.55,
-            "trade_count": 50,
-            "sharpe": 1.2,
-        }
-        assert meets_phase1_criteria(stats) is True
+        assert meets_phase1_criteria(_passing_stats()) is True
 
-    def test_failing_return(self):
-        stats = {
-            "total_return": 0.10,  # below 0.20
-            "max_drawdown": -0.15,
-            "profit_factor": 1.5,
-            "win_rate": 0.55,
-            "trade_count": 50,
-            "sharpe": 1.2,
-        }
+    @pytest.mark.parametrize("key, value", [
+        ("cagr", 0.10),             # not above 10%
+        ("max_drawdown", -0.25),    # below -20%
+        ("profit_factor", 1.3),     # not above 1.3
+        ("trade_count", 30),        # not above 30
+        ("sharpe", 0.8),            # not above 0.8
+        ("lookahead", True),
+        ("floor_failures", [{"pair": "SOL", "check": "profit_factor", "value": 0.9, "threshold": 1.0}]),
+    ])
+    def test_each_check_can_fail_it(self, key, value):
+        stats = _passing_stats(**{key: value})
         assert meets_phase1_criteria(stats) is False
-
-    def test_failing_drawdown(self):
-        stats = {
-            "total_return": 0.30,
-            "max_drawdown": -0.25,  # below -0.20
-            "profit_factor": 1.5,
-            "win_rate": 0.55,
-            "trade_count": 50,
-            "sharpe": 1.2,
-        }
-        assert meets_phase1_criteria(stats) is False
+        failed = [k for k, c in stats["gate"].items() if not c["passed"]]
+        assert len(failed) == 1
 
     def test_low_win_rate_still_passes(self):
         """Win rate is not gated: a 35% win rate with big winners passes."""
-        stats = {
-            "total_return": 0.30,
-            "max_drawdown": -0.15,
-            "profit_factor": 1.5,
-            "win_rate": 0.35,
-            "trade_count": 50,
-            "sharpe": 1.2,
-        }
-        assert meets_phase1_criteria(stats) is True
+        assert meets_phase1_criteria(_passing_stats(win_rate=0.35)) is True
 
-    def test_failing_trade_count(self):
-        stats = {
-            "total_return": 0.30,
-            "max_drawdown": -0.15,
-            "profit_factor": 1.5,
-            "win_rate": 0.55,
-            "trade_count": 10,  # below 30
-            "sharpe": 1.2,
-        }
+    def test_more_attempts_raise_the_sharpe_bar(self):
+        stats = _passing_stats(sharpe=1.2)
+        assert meets_phase1_criteria(stats, attempts=1) is True
+        assert meets_phase1_criteria(stats, attempts=10) is False
+        sharpe_check = stats["gate"]["sharpe"]
+        assert sharpe_check["required_sharpe"] == pytest.approx(required_sharpe(10, 2.3, 0.6), abs=1e-4)
+        assert sharpe_check["passed"] is False and sharpe_check["attempts"] == 10
+
+    def test_strategy_must_beat_buy_and_hold_sharpe(self):
+        stats = _passing_stats(sharpe=1.2, benchmark={"sharpe": 1.3})
+        assert meets_phase1_criteria(stats) is False
+        assert stats["gate"]["sharpe"]["threshold"] == pytest.approx(1.3)
+
+    def test_gate_breakdown_has_value_threshold_passed(self):
+        gate = phase1_gate(_passing_stats())
+        assert set(gate) == {"cagr", "max_drawdown", "profit_factor", "trade_count",
+                             "sharpe", "floor", "lookahead"}
+        for check in gate.values():
+            assert {"value", "threshold", "passed"} <= set(check)
+
+    def test_missing_floor_result_fails_closed(self):
+        stats = _passing_stats()
+        del stats["floor_failures"]
         assert meets_phase1_criteria(stats) is False
 
 
@@ -444,9 +501,7 @@ def generate_signals(df):
         assert msg in r["error"]
 
     def test_gate_rejects_lookahead_stats(self):
-        stats = {"total_return": 0.30, "max_drawdown": -0.15, "profit_factor": 1.5,
-                 "trade_count": 50, "sharpe": 1.2, "lookahead": True}
-        assert meets_phase1_criteria(stats) is False
+        assert meets_phase1_criteria(_passing_stats(lookahead=True)) is False
 
 
 class TestValidateSignals:
@@ -467,3 +522,117 @@ class TestValidateSignals:
     def test_rejects_strings(self):
         with pytest.raises(SignalError, match="non-numeric"):
             validate_signals(pd.Series(["buy", "sell", "hold"]), pd.RangeIndex(3))
+
+
+# --- Development data only, combined account, benchmark, gate breakdown ---
+
+def _write_pair(data_dir: Path, pair: str, start: str, n: int, seed: int):
+    rng = np.random.RandomState(seed)
+    prices = 100 * np.cumprod(1 + rng.normal(0.0005, 0.02, n))
+    ts = pd.date_range(start, periods=n, freq="4h", tz="UTC")
+    pd.DataFrame({"timestamp": ts, "open": prices, "high": prices, "low": prices,
+                  "close": prices, "volume": 1.0}).to_feather(data_dir / f"{pair}.feather")
+
+
+@pytest.fixture
+def holdout_2025_03_01(tmp_path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "holdout.json").write_text('{"holdout_start": "2025-03-01"}')
+    monkeypatch.setenv("TRADING_CONFIG_DIR", str(config))
+    return pd.Timestamp("2025-03-01", tz="UTC")
+
+
+class TestDevelopmentDataOnly:
+    def test_strategy_that_trades_only_after_holdout_start_has_zero_trades(self, tmp_path, holdout_2025_03_01):
+        # 600 bars from 2025-01-01 run to mid-April: the last ~280 bars are holdout.
+        _write_pair(tmp_path, "BTC_USDC-USDC_4h", "2025-01-01", 600, seed=3)
+        (tmp_path / "Late.py").write_text(f'''
+import pandas as pd
+def generate_signals(df):
+    ts = pd.to_datetime(df["timestamp"], utc=True)
+    return (ts >= pd.Timestamp("{holdout_2025_03_01.isoformat()}")).astype(int)
+''')
+        r = run_fast_filter("Late", pairs=["BTC_USDC-USDC_4h"], data_dir=tmp_path, strategies_dir=tmp_path)
+        assert r["trade_count"] == 0
+        assert r["total_return"] == 0.0
+        assert r["lookahead"] is False
+        assert pd.Timestamp(r["development_end"]) < holdout_2025_03_01
+
+    def test_generate_signals_never_sees_a_holdout_bar(self, tmp_path, holdout_2025_03_01):
+        _write_pair(tmp_path, "BTC_USDC-USDC_4h", "2025-01-01", 600, seed=3)
+        (tmp_path / "Guard.py").write_text(f'''
+import pandas as pd
+def generate_signals(df):
+    assert pd.to_datetime(df["timestamp"], utc=True).max() < pd.Timestamp("{holdout_2025_03_01.isoformat()}")
+    return (df.close.diff() > 0).astype(int)
+''')
+        r = run_fast_filter("Guard", pairs=["BTC_USDC-USDC_4h"], data_dir=tmp_path, strategies_dir=tmp_path)
+        assert "error" not in r
+        assert r["trade_count"] > 0
+
+    def test_pair_with_only_holdout_data_is_skipped(self, tmp_path, holdout_2025_03_01):
+        _write_pair(tmp_path, "BTC_USDC-USDC_4h", "2025-04-01", 100, seed=3)
+        (tmp_path / "S.py").write_text(EMA_CROSS)
+        r = run_fast_filter("S", pairs=["BTC_USDC-USDC_4h"], data_dir=tmp_path, strategies_dir=tmp_path)
+        assert r["error"] == "No data files found"
+
+
+class TestCombinedAccount:
+    PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
+
+    def _run(self, tmp_path, code=EMA_CROSS, attempts=1):
+        for seed, pair in enumerate(self.PAIRS, start=11):
+            _write_pair(tmp_path, pair, "2023-01-01", 800, seed=seed)
+        (tmp_path / "S.py").write_text(code)
+        return run_fast_filter("S", pairs=self.PAIRS, data_dir=tmp_path, strategies_dir=tmp_path,
+                               attempts=attempts)
+
+    def test_headline_is_the_equal_weight_account(self, tmp_path):
+        from backtest_api.fast_filter import _simulate
+        r = self._run(tmp_path)
+        nets = {}
+        for pair in self.PAIRS:
+            df = pd.read_feather(tmp_path / f"{pair}.feather")
+            sig = (df.close.ewm(span=12, adjust=False).mean() > df.close.ewm(span=26, adjust=False).mean()).astype(int)
+            nets[pair] = pd.Series(_simulate(df.close, sig)[0].to_numpy(), index=df.timestamp)
+        expected = float((1 + pd.DataFrame(nets).mean(axis=1)).prod() - 1)
+        assert r["total_return"] == pytest.approx(expected, abs=1e-4)
+        assert r["trade_count"] == sum(m["trade_count"] for m in r["per_pair"].values())
+        assert set(r["per_pair"]) == set(self.PAIRS)
+        assert {"cagr", "sharpe", "max_drawdown", "calmar", "profit_factor", "win_rate", "years"} <= set(r)
+
+    def test_reports_benchmark_alpha_beta_floor_and_gate(self, tmp_path):
+        r = self._run(tmp_path)
+        assert set(r["benchmark"]) == {"total_return", "sharpe", "max_drawdown"}
+        assert set(r["alpha_beta"]) == {"beta", "alpha_annual"}
+        assert 0 < r["alpha_beta"]["beta"] < 1  # long-or-flat: partial market exposure
+        assert r["floor_failures"] == floor_failures(r["per_pair"])
+        assert r["gate"]["sharpe"]["required_sharpe"] == pytest.approx(
+            required_sharpe(1, r["years"], r["benchmark"]["sharpe"]), abs=1e-4)
+        assert meets_phase1_criteria(r) is all(c["passed"] for c in r["gate"].values())
+
+    def test_attempts_flow_into_the_gate(self, tmp_path):
+        one = self._run(tmp_path, attempts=1)["gate"]["sharpe"]["required_sharpe"]
+        many = self._run(tmp_path, attempts=50)["gate"]["sharpe"]["required_sharpe"]
+        assert many > one
+
+    def test_floor_failure_names_the_pair(self, tmp_path):
+        # Long only on SOL every other bar: fees make SOL lose; BTC/ETH flat.
+        code = '''
+import numpy as np
+def generate_signals(df):
+    if df.close.iloc[0] != SOL_FIRST:
+        return df.close * 0
+    return (np.arange(len(df)) % 2).astype(int)
+'''
+        sol_first = None
+        for seed, pair in enumerate(self.PAIRS, start=11):
+            _write_pair(tmp_path, pair, "2023-01-01", 800, seed=seed)
+        sol_first = float(pd.read_feather(tmp_path / "SOL_USDC-USDC_4h.feather").close.iloc[0])
+        (tmp_path / "S.py").write_text(code.replace("SOL_FIRST", repr(sol_first)))
+        r = run_fast_filter("S", pairs=self.PAIRS, data_dir=tmp_path, strategies_dir=tmp_path)
+        assert any(f["pair"] == "SOL_USDC-USDC_4h" and f["check"] == "profit_factor"
+                   for f in r["floor_failures"])
+        assert r["gate"]["floor"]["passed"] is False
+        assert meets_phase1_criteria(r) is False

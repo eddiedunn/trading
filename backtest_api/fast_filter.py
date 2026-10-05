@@ -5,11 +5,16 @@ Sub-millisecond per evaluation, 10,000 variants in under 10 seconds.
 """
 
 import importlib.util
+import math
 import os
 from pathlib import Path
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
+
+from backtest_api import periods
+from backtest_api.benchmark import BARS_PER_YEAR, alpha_beta, buy_and_hold, portfolio_returns, sharpe
 
 TAKER_FEE = 0.00045  # Hyperliquid taker rate (conservative — maker is 0.00015)
 
@@ -38,8 +43,20 @@ def run_fast_filter(
     pairs: list[str] | None = None,
     data_dir: Path | None = None,
     strategies_dir: Path | None = None,
+    attempts: int = 1,
 ) -> dict:
-    """Load strategy module, run signal function on OHLCV data, compute metrics."""
+    """Load a strategy module, run its signals on each pair's development bars, score it.
+
+    Only bars before ``periods.holdout_start()`` are ever passed to
+    ``generate_signals`` (and to the look-ahead check), so Phase 1 never sees
+    the held-back final-test data.
+
+    The headline metrics are for one combined account: an equal-weight
+    portfolio of the pairs, rebalanced every bar (see ``_portfolio_stats``).
+    ``per_pair`` keeps each pair's own metrics. ``attempts`` only sets the
+    Sharpe bar shown in ``stats["gate"]``; ``meets_phase1_criteria`` recomputes
+    the gate with the attempt count its caller passes.
+    """
     pairs = pairs or DEFAULT_PAIRS
     data_dir = data_dir or DATA_DIR
     strategies_dir = strategies_dir or STRATEGIES_DIR
@@ -50,21 +67,27 @@ def run_fast_filter(
     spec.loader.exec_module(mod)
 
     results = {}
+    net_returns: dict[str, pd.Series] = {}
+    trades: list[pd.Series] = []
+    closes: dict[str, pd.Series] = {}
     lookahead_reasons = []
     for pair in pairs:
         feather_path = data_dir / f"{pair}.feather"
         if not feather_path.exists():
             continue
-        df = pd.read_feather(feather_path)
+        df = periods.development_part(pd.read_feather(feather_path))
+        if df.empty:
+            continue
         try:
             signals = validate_signals(mod.generate_signals(df.copy()), df.index)
             lookahead = _lookahead_mismatch(mod.generate_signals, df, signals)
         except SignalError as e:
             return {"error": f"{pair}: {e}", "invalid_signals": True, "per_pair": {}}
 
-        timestamps = df["timestamp"] if "timestamp" in df.columns else None
-        funding = load_funding(data_dir, pair, timestamps) if timestamps is not None else None
-        metrics = _compute_metrics(df["close"], signals, funding=funding, timestamps=timestamps)
+        timestamps = df["timestamp"]
+        funding = load_funding(data_dir, pair, timestamps)
+        returns, trade_returns = _simulate(df["close"], signals, funding=funding)
+        metrics = _metrics(returns, trade_returns, timestamps=timestamps)
         if funding is None:
             metrics["funding"] = "assumed"
         else:
@@ -74,17 +97,29 @@ def run_fast_filter(
             lookahead_reasons.append(f"{pair}: {lookahead}")
         results[pair] = metrics
 
+        ts_index = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True))
+        net_returns[pair] = pd.Series(returns.to_numpy(), index=ts_index)
+        closes[pair] = pd.Series(df["close"].to_numpy(dtype=float), index=ts_index)
+        trades.append(trade_returns)
+
     if not results:
         return {"error": "No data files found", "per_pair": {}}
 
-    agg = _aggregate_metrics(results)
-    agg["lookahead"] = bool(lookahead_reasons)
+    portfolio = portfolio_net_returns(net_returns)
+    stats = _portfolio_stats(portfolio, pd.concat(trades) if trades else pd.Series(dtype=float))
+    stats["per_pair"] = results
+    stats["floor_failures"] = floor_failures(results)
+    stats["benchmark"] = buy_and_hold(closes)
+    stats["alpha_beta"] = alpha_beta(portfolio, portfolio_returns(closes))
+    stats["development_end"] = str(portfolio.index[-1]) if len(portfolio) else None
+    stats["lookahead"] = bool(lookahead_reasons)
     if lookahead_reasons:
-        agg["rejected_reason"] = (
+        stats["rejected_reason"] = (
             "Look-ahead: signals change when future bars are removed, so generate_signals "
             "reads data from after the bar it is deciding on. " + "; ".join(lookahead_reasons)
         )
-    return agg
+    stats["gate"] = phase1_gate(stats, attempts)
+    return stats
 
 
 def validate_signals(raw, index: pd.Index) -> pd.Series:
@@ -196,7 +231,17 @@ def _compute_metrics(
     funding: pd.Series | None = None,
     timestamps: pd.Series | None = None,
 ) -> dict:
-    """Compute signal quality metrics from a position series.
+    """Metrics for one pair's position series (see ``_simulate`` for the cost model)."""
+    returns, trade_returns = _simulate(close, signals, funding=funding)
+    return _metrics(returns, trade_returns, timestamps=timestamps)
+
+
+def _simulate(
+    close: pd.Series,
+    signals: pd.Series,
+    funding: pd.Series | None = None,
+) -> tuple[pd.Series, pd.Series]:
+    """Per-bar net returns and per-trade returns for one pair.
 
     ``funding`` is the signed funding rate summed over each bar (aligned to
     ``close``), positive = longs pay. NaN bars, or funding=None, use the assumed
@@ -221,22 +266,6 @@ def _compute_metrics(
         funding_cost = (pos * funding).where(funding.notna(), assumed)
     returns -= funding_cost
 
-    # Cumulative equity curve
-    equity = (1 + returns).cumprod()
-
-    # Sharpe (annualized for 4h bars — 6 bars/day × 365 days)
-    bars_per_year = 6 * 365
-    sharpe = (
-        (returns.mean() / returns.std()) * np.sqrt(bars_per_year)
-        if returns.std() > 0
-        else 0
-    )
-
-    # Max drawdown
-    peak = equity.cummax()
-    drawdown = (equity - peak) / peak
-    max_drawdown = drawdown.min()
-
     # Trade segmentation: a trade is a run of bars with the same nonzero side.
     side = np.sign(pos)
     prev_side = np.sign(prev)
@@ -253,34 +282,34 @@ def _compute_metrics(
         exit_fee.groupby(prev_ids).sum(), fill_value=0.0
     )
     trade_returns = trade_returns[trade_returns.index > 0]  # drop flat periods
+    return returns, trade_returns
 
-    win_count = (trade_returns > 0).sum()
+
+def _years(n_bars: int, timestamps=None) -> float:
+    if timestamps is not None and len(timestamps) > 1:
+        ts = pd.to_datetime(pd.Series(timestamps), utc=True)
+        return float((ts.iloc[-1] - ts.iloc[0]) / pd.Timedelta(days=365.25))
+    return n_bars / BARS_PER_YEAR
+
+
+def _metrics(returns: pd.Series, trade_returns: pd.Series, timestamps=None) -> dict:
+    """Equity-curve metrics from per-bar returns, trade metrics from per-trade returns."""
+    equity = (1 + returns).cumprod()
+    max_drawdown = float((equity / equity.cummax() - 1).min()) if len(equity) else 0.0
+    total_return = float(equity.iloc[-1] - 1) if len(equity) else 0.0
+
+    cagr = _cagr(total_return, _years(len(returns), timestamps))
+    calmar = cagr / abs(max_drawdown) if max_drawdown != 0 else 0.0
+
     trade_count = len(trade_returns)
-    win_rate = win_count / trade_count if trade_count > 0 else 0
-
+    win_rate = (trade_returns > 0).sum() / trade_count if trade_count > 0 else 0
     gross_profit = trade_returns[trade_returns > 0].sum()
     gross_loss = abs(trade_returns[trade_returns <= 0].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
 
-    total_return = equity.iloc[-1] - 1 if len(equity) > 0 else 0
-
-    # Calmar (annualized return / max drawdown)
-    if timestamps is not None and len(timestamps) > 1:
-        ts = pd.to_datetime(timestamps, utc=True)
-        years = (ts.iloc[-1] - ts.iloc[0]) / pd.Timedelta(days=365.25)
-    else:
-        years = len(close) / bars_per_year
-    if years <= 0:
-        annual_return = 0
-    elif total_return <= -1:
-        annual_return = -1.0  # wiped out; avoid a complex root
-    else:
-        annual_return = (1 + total_return) ** (1 / years) - 1
-    calmar = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0
-
     return {
         "total_return": round(float(total_return), 4),
-        "sharpe": round(float(sharpe), 4),
+        "sharpe": round(sharpe(returns), 4),
         "max_drawdown": round(float(max_drawdown), 4),
         "win_rate": round(float(win_rate), 4),
         "profit_factor": round(float(profit_factor), 4),
@@ -289,33 +318,143 @@ def _compute_metrics(
     }
 
 
-def _aggregate_metrics(results: dict) -> dict:
-    """Average metrics across pairs."""
-    keys = ["total_return", "sharpe", "max_drawdown", "win_rate", "profit_factor", "calmar"]
-    agg = {}
-    for k in keys:
-        vals = [
-            r[k]
-            for r in results.values()
-            if isinstance(r[k], (int, float)) and r[k] != float("inf")
-        ]
-        agg[k] = round(np.mean(vals), 4) if vals else 0
-    agg["trade_count"] = sum(r["trade_count"] for r in results.values())
-    agg["per_pair"] = results
-    return agg
+def portfolio_net_returns(pair_returns: dict[str, pd.Series]) -> pd.Series:
+    """Per-bar net return of one account split equally across the pairs.
 
-
-def meets_phase1_criteria(stats: dict) -> bool:
-    """Phase 1 gate: PF>1.3, DD>-20%, Sharpe>0.8, 30+ trades, return>20%, no look-ahead.
-
-    Win rate is reported but not gated: trend and breakout strategies win
-    under half their trades and still pay, and profit factor already covers it.
+    Each series is a pair's per-bar net return indexed by bar timestamp. The
+    account's return on a bar is the mean of the pairs' returns on that bar,
+    which is an equal-weight portfolio rebalanced back to 1/N every bar (no
+    rebalancing fees are charged). A bar where some pair has no data averages
+    over the pairs that do, the same convention as ``benchmark.portfolio_returns``.
     """
-    return (
-        not stats.get("lookahead", False)
-        and stats.get("total_return", 0) > 0.20
-        and stats.get("max_drawdown", -1) > -0.20
-        and stats.get("profit_factor", 0) > 1.30
-        and stats.get("trade_count", 0) > 30
-        and stats.get("sharpe", 0) > 0.80
-    )
+    frame = pd.DataFrame(pair_returns).sort_index()
+    return frame.mean(axis=1, skipna=True).fillna(0.0)
+
+
+def _portfolio_stats(portfolio: pd.Series, pooled_trades: pd.Series) -> dict:
+    """Headline stats: equity metrics on the combined account, trade metrics pooled."""
+    m = _metrics(portfolio, pooled_trades, timestamps=portfolio.index)
+    years = _years(len(portfolio), portfolio.index)
+    total_return = float((1 + portfolio).prod() - 1) if len(portfolio) else 0.0
+    return {
+        "total_return": m["total_return"],
+        "cagr": round(float(_cagr(total_return, years)), 4),
+        "sharpe": m["sharpe"],
+        "max_drawdown": m["max_drawdown"],
+        "calmar": m["calmar"],
+        "profit_factor": m["profit_factor"],
+        "win_rate": m["win_rate"],
+        "trade_count": m["trade_count"],
+        "years": round(years, 4),
+    }
+
+
+def _cagr(total_return: float, years: float) -> float:
+    if years <= 0:
+        return 0.0
+    if total_return <= -1:
+        return -1.0  # wiped out; avoid a complex root
+    return (1 + total_return) ** (1 / years) - 1
+
+
+# Per-pair floor: no single pair may carry the rest.
+FLOOR_MIN_PROFIT_FACTOR = 1.0
+FLOOR_MIN_MAX_DRAWDOWN = -0.35
+
+
+def floor_failures(per_pair: dict) -> list[dict]:
+    """Pairs that break the floor: profit_factor >= 1.0 and max_drawdown > -0.35 each."""
+    out = []
+    for pair, m in per_pair.items():
+        if m["profit_factor"] < FLOOR_MIN_PROFIT_FACTOR:
+            out.append({"pair": pair, "check": "profit_factor", "value": m["profit_factor"],
+                        "threshold": FLOOR_MIN_PROFIT_FACTOR})
+        if not m["max_drawdown"] > FLOOR_MIN_MAX_DRAWDOWN:
+            out.append({"pair": pair, "check": "max_drawdown", "value": m["max_drawdown"],
+                        "threshold": FLOOR_MIN_MAX_DRAWDOWN})
+    return out
+
+
+MIN_SHARPE = 0.8
+_EULER_GAMMA = 0.5772156649015329
+
+
+def expected_max_sharpe(attempts: int, years: float) -> float:
+    """Annualised Sharpe the best of ``attempts`` zero-edge strategies is expected to show.
+
+    Uses the expected maximum of N independent standard normals,
+
+        E[max Z_N] ~ (1 - g) * Phi^-1(1 - 1/N) + g * Phi^-1(1 - 1/(N e)),  g = Euler-Mascheroni,
+
+    as in Bailey & Lopez de Prado, "The Deflated Sharpe Ratio" (J. Portfolio
+    Management, 2014), eq. for SR_0 with V[SR] set to the zero-edge sampling
+    variance. A zero-edge strategy's annualised Sharpe estimated over ``years``
+    has standard error ~ 1/sqrt(years), so the noise bar is E[max Z_N]/sqrt(years).
+    Returns 0 for attempts <= 1. Increasing in attempts, decreasing in years.
+    """
+    if attempts <= 1:
+        return 0.0
+    if years <= 0:
+        return float("inf")
+    n = float(attempts)
+    inv = NormalDist().inv_cdf
+    e_max = (1 - _EULER_GAMMA) * inv(1 - 1 / n) + _EULER_GAMMA * inv(1 - 1 / (n * math.e))
+    return e_max / math.sqrt(years)
+
+
+def required_sharpe(attempts: int, years: float, benchmark_sharpe: float) -> float:
+    """Sharpe a strategy must beat: max(0.8, buy-and-hold Sharpe) + the multiple-testing noise bar."""
+    return max(MIN_SHARPE, benchmark_sharpe) + expected_max_sharpe(attempts, years)
+
+
+# Phase 1 gate thresholds (portfolio-level unless noted).
+GATE_MIN_CAGR = 0.10
+GATE_MIN_MAX_DRAWDOWN = -0.20
+GATE_MIN_PROFIT_FACTOR = 1.3  # pooled trades
+GATE_MIN_TRADES = 30
+
+
+def phase1_gate(stats: dict, attempts: int = 1) -> dict:
+    """Each Phase 1 check as ``{name: {value, threshold, passed}}``.
+
+    Every check except ``lookahead`` and ``floor`` requires value > threshold.
+    """
+    bench_sharpe = (stats.get("benchmark") or {}).get("sharpe", 0.0)
+    years = stats.get("years", 0.0)
+    req = required_sharpe(attempts, years, bench_sharpe)
+
+    def above(name, default, threshold):
+        v = stats.get(name, default)
+        return {"value": v, "threshold": threshold, "passed": bool(v > threshold)}
+
+    failures = stats.get("floor_failures")
+    gate = {
+        "cagr": above("cagr", 0.0, GATE_MIN_CAGR),
+        "max_drawdown": above("max_drawdown", -1.0, GATE_MIN_MAX_DRAWDOWN),
+        "profit_factor": above("profit_factor", 0.0, GATE_MIN_PROFIT_FACTOR),
+        "trade_count": above("trade_count", 0, GATE_MIN_TRADES),
+        "sharpe": {**above("sharpe", 0.0, round(req, 4)), "required_sharpe": round(req, 4),
+                   "attempts": attempts, "years": years, "benchmark_sharpe": bench_sharpe},
+        "floor": {"value": failures if failures is not None else "not computed", "threshold": [],
+                  "passed": failures == []},
+        "lookahead": {"value": bool(stats.get("lookahead", False)), "threshold": False,
+                      "passed": not stats.get("lookahead", False)},
+    }
+    return gate
+
+
+def meets_phase1_criteria(stats: dict, attempts: int = 1) -> bool:
+    """Phase 1 gate on the combined account. All must hold:
+
+    CAGR > 10%, max drawdown > -20%, pooled profit factor > 1.3, more than 30
+    trades, Sharpe > required_sharpe(attempts, years, buy-and-hold Sharpe), no
+    pair below the per-pair floor, and no look-ahead.
+
+    Recomputes ``stats["gate"]`` with this ``attempts`` (so the stored breakdown
+    matches the verdict). Win rate is reported but not gated: trend and breakout
+    strategies win under half their trades and still pay, and profit factor
+    already covers it.
+    """
+    gate = phase1_gate(stats, attempts)
+    stats["gate"] = gate
+    return all(check["passed"] for check in gate.values())
