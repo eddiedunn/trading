@@ -1,15 +1,14 @@
 """The agent loop: write, validate, Phase 1, Phase 2, revise on failure.
 
 One strategy at a time; each gets its own Claude conversation. A strategy that
-passes both phases is written to the run folder with its API responses, and
-the command to queue it for the paper arena is printed. Nothing here can
-promote: the only trinity-side call is ``paper-add`` (never ``--force``), and
-only with ``--queue-paper``.
+passes both phases is written to the run folder with its API responses and the
+agent stops working on it, printing the command a human runs for the final
+test on the held-back data. The agent never runs the final test, never queues
+for paper, and never promotes; it makes no calls to trinity at all.
 """
 
 import logging
 import shlex
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,8 +20,6 @@ from agent.validate import MAX_PARAMS, validate_strategy
 
 log = logging.getLogger("agent")
 
-TRINITY_PAPER_DIR = "/data/services/trading/paper"
-
 
 @dataclass
 class Config:
@@ -33,8 +30,6 @@ class Config:
     max_params: int = MAX_PARAMS
     model: str = DEFAULT_MODEL
     api_url: str = api.DEFAULT_API_URL
-    queue_paper: bool = False
-    trinity: str = "trinity"
     name_prefix: str = "Agent"
 
 
@@ -120,48 +115,20 @@ def _develop_one(cfg: Config, runlog: RunLog, writer: StrategyWriter, name: str,
             continue
 
         paths = runlog.save_final(name, code, phase1_result, phase2_result)
-        _hand_off(cfg, name, paths)
-        return Outcome(name, True, attempts, phase2_runs, "passed Phase 1 and Phase 2", paths)
+        _hand_off(name, paths)
+        return Outcome(name, True, attempts, phase2_runs, "passed Phase 1 and Phase 2; final test is for a human", paths)
 
     return Outcome(name, False, attempts, phase2_runs, "iteration budget used up")
 
 
-def paper_add_commands(name: str, paths: dict[str, Path], trinity: str = "trinity") -> list[str]:
-    """The exact commands a human runs to queue the strategy for the paper arena."""
-    code, p1, p2 = paths["code"], paths["phase1"], paths["phase2"]
-    remote = f"{TRINITY_PAPER_DIR}/{name}"
-    return [
-        f"scripts/submit_strategy.sh {shlex.quote(str(code))}",
-        # Or, reusing the saved results instead of re-running both phases:
-        f"scp {shlex.quote(str(code))} {shlex.quote(str(p1))} {shlex.quote(str(p2))} {trinity}:{TRINITY_PAPER_DIR}/ && "
-        f"ssh {trinity} podman exec paper-arena-monitor python -m live.trading_client paper-add "
-        f"--strategy {name} --file {remote}.py --phase1 {TRINITY_PAPER_DIR}/{p1.name} --phase2 {TRINITY_PAPER_DIR}/{p2.name}",
-    ]
+def final_test_command(paths: dict[str, Path]) -> str:
+    """The command a human runs: Phase 1, Phase 2, the final test, then paper-add if all pass."""
+    return f"scripts/submit_strategy.sh {shlex.quote(str(paths['code']))}"
 
 
-def queue_paper(name: str, paths: dict[str, Path], trinity: str = "trinity") -> None:
-    """Copy the file and results to trinity and run paper-add there. Never passes --force."""
-    code, p1, p2 = paths["code"], paths["phase1"], paths["phase2"]
-    subprocess.run(["scp", "-q", str(code), str(p1), str(p2), f"{trinity}:{TRINITY_PAPER_DIR}/"], check=True)
-    remote_code = f"{TRINITY_PAPER_DIR}/{name}.py"
-    remote_p1 = f"{TRINITY_PAPER_DIR}/{p1.name}"
-    remote_p2 = f"{TRINITY_PAPER_DIR}/{p2.name}"
-    try:
-        subprocess.run(
-            ["ssh", trinity, "podman", "exec", "paper-arena-monitor", "python", "-m", "live.trading_client",
-             "paper-add", "--strategy", name, "--file", remote_code, "--phase1", remote_p1, "--phase2", remote_p2],
-            check=True,
-        )
-    finally:
-        subprocess.run(["ssh", trinity, "rm", "-f", remote_code, remote_p1, remote_p2], check=False)
-
-
-def _hand_off(cfg: Config, name: str, paths: dict[str, Path]) -> None:
-    if cfg.queue_paper:
-        log.info("   queueing %s for the paper arena on %s", name, cfg.trinity)
-        queue_paper(name, paths, cfg.trinity)
-        return
-    print(f"\n{name} passed both phases. Saved to {paths['code']}. To queue it for the paper arena, run one of:")
-    for cmd in paper_add_commands(name, paths, cfg.trinity):
-        print(f"  {cmd}")
+def _hand_off(name: str, paths: dict[str, Path]) -> None:
+    print(f"\n{name} passed Phase 1 and Phase 2. Saved to {paths['code']}.")
+    print("The agent stops here. The final test on the held-back data runs once per strategy and can't be")
+    print("repeated. To run it, and queue the strategy for paper if it passes, run:")
+    print(f"  {final_test_command(paths)}")
     print()

@@ -1,4 +1,4 @@
-"""Unit tests for the strategy agent: validation, feedback redaction, the loop,
+"""Unit tests for the strategy agent: validation, feedback, the loop,
 and the hand-off. The Anthropic client and the backtest API are mocked."""
 
 import json
@@ -12,7 +12,7 @@ import pytest
 from agent import backtest_client as api
 from agent.cli import main
 from agent.llm import ReplyError, StrategyWriter, extract_code
-from agent.loop import Config, paper_add_commands, queue_paper, run
+from agent.loop import Config, final_test_command, run
 from agent.prompts import system_prompt
 from agent.runlog import RunLog
 from agent.validate import strategy_name_from_code, validate_strategy
@@ -23,17 +23,25 @@ GOOD = EXAMPLE.replace("EmaCross", "Good")
 
 
 def _phase1(passed=True):
-    return {"phase": 1, "passed": passed, "stats": {
+    return {"phase": 1, "passed": passed, "campaign": "2026-04-06", "attempts": 7, "required_sharpe": 1.32, "stats": {
         "total_return": 0.3, "sharpe": 1.0, "max_drawdown": -0.1, "win_rate": 0.5, "profit_factor": 1.5,
-        "trade_count": 40, "calmar": 2.0,
+        "trade_count": 40, "calmar": 2.0, "cagr": 0.12, "years": 2.3,
+        "benchmark": {"total_return": 0.8, "sharpe": 0.71, "max_drawdown": -0.55},
+        "alpha_beta": {"beta": 0.42, "alpha_annual": 0.05},
+        "floor_failures": ["sharpe below required"] if not passed else [],
+        "gate": {"sharpe": {"value": 1.0, "threshold": 1.32, "passed": passed},
+                 "profit_factor": {"value": 1.5, "threshold": 1.3, "passed": True}},
         "per_pair": {"BTC_USDC-USDC_4h": {"total_return": 0.3, "profit_factor": 1.5, "max_drawdown": -0.1, "trade_count": 40}}}}
 
 
 def _phase2(passed=True):
     return {"phase": 2, "passed": passed, "windows": [
-        {"label": "in-sample", "timerange": "20240101-20250101", "passed": True, "profit_factor": 1.4, "max_drawdown": -0.1},
-        {"label": "validation", "timerange": "20250101-20250701", "passed": True, "profit_factor": 1.3, "max_drawdown": -0.12},
-        {"label": "out-of-sample", "timerange": "20250701-20260101", "passed": passed, "profit_factor": 0.9, "max_drawdown": -0.3},
+        {"label": "period 1", "timerange": "20240101-20240901", "passed": True, "trades": 20, "profit_total": 0.1,
+         "profit_factor": 1.4, "max_drawdown": -0.1},
+        {"label": "period 2", "timerange": "20240901-20250501", "passed": True, "trades": 18, "profit_total": 0.07,
+         "profit_factor": 1.3, "max_drawdown": -0.12},
+        {"label": "period 3", "timerange": "20250501-20260101", "passed": passed, "trades": 15, "profit_total": -0.04,
+         "profit_factor": 0.9, "max_drawdown": -0.3},
     ]}
 
 
@@ -200,20 +208,31 @@ class TestLookAhead:
 
 
 class TestFeedback:
-    def test_phase2_feedback_hides_out_of_sample_numbers_and_dates(self):
+    def test_phase2_feedback_shows_every_period_in_full(self):
+        """All three periods are development data now, so nothing is hidden."""
         text = api.phase2_feedback(_phase2(passed=False))
-        assert "in-sample: passed (pf=1.4000, dd=-0.1000)" in text
-        assert "out-of-sample: failed" in text
-        assert "0.9" not in text and "-0.3" not in text
-        assert "2025" not in text
+        assert "period 1 (20240101-20240901): passed (trades=20, profit_total=0.1000, pf=1.4000, dd=-0.1000)" in text
+        assert "period 3 (20250501-20260101): failed (trades=15, profit_total=-0.0400, pf=0.9000, dd=-0.3000)" in text
 
     def test_phase2_feedback_shows_window_error(self):
-        result = {"passed": False, "windows": [{"label": "in-sample", "passed": False, "error": "boom"}]}
-        assert "in-sample: failed — error: boom" in api.phase2_feedback(result)
+        result = {"passed": False, "windows": [{"label": "period 1", "passed": False, "error": "boom"}]}
+        assert "period 1: failed — error: boom" in api.phase2_feedback(result)
 
     def test_phase1_feedback_has_gate_and_pairs(self):
         text = api.phase1_feedback(_phase1(False))
         assert "Phase 1 FAILED" in text and "profit_factor=1.5000" in text and "BTC_USDC-USDC_4h" in text
+
+    def test_phase1_feedback_has_gate_breakdown_benchmark_and_attempts(self):
+        text = api.phase1_feedback(_phase1(False))
+        assert "sharpe: 1.0000 vs threshold 1.3200 — FAILED" in text
+        assert "profit_factor: 1.5000 vs threshold 1.3000 — passed" in text
+        assert "attempt 7 in the campaign" in text and "Sharpe bar is now 1.3200" in text
+        assert "Strategy sharpe=1.0000 vs buy-and-hold 0.7100" in text and "beta=0.4200" in text
+        assert "Floor failures: sharpe below required" in text
+
+    def test_phase1_feedback_copes_with_old_shape(self):
+        text = api.phase1_feedback({"passed": True, "stats": {"sharpe": 1.0}})
+        assert "Phase 1 PASSED" in text and "Gate checks" not in text and "Strategy sharpe=" not in text
 
 
 class TestBacktestClient:
@@ -336,7 +355,9 @@ class TestLoop:
         assert stages == [("llm", True), ("validate", False), ("llm", True), ("validate", True),
                           ("phase1", True), ("phase2", True), ("result", True)]
         out = capsys.readouterr().out
-        assert "scripts/submit_strategy.sh" in out and "paper-add" in out and "--force" not in out
+        assert f"scripts/submit_strategy.sh {tmp_path / 'run1' / name}.py" in out
+        assert "paper-add" not in out and "--force" not in out
+        assert all(c.args[2] in (1, 2) for c in run_phase.call_args_list)
 
     @patch("agent.loop.api.run_phase")
     def test_phase1_failure_feedback_and_iteration_cap(self, run_phase, tmp_path):
@@ -359,7 +380,8 @@ class TestLoop:
 
         assert outcomes[0].reason == "Phase 2 budget used up"
         assert outcomes[0].phase2_runs == 1
-        assert "out-of-sample: failed" in writer.feedback[0] and "0.9" not in writer.feedback[0]
+        assert "period 3 (20250501-20260101): failed" in writer.feedback[0] and "pf=0.9000" in writer.feedback[0]
+        assert "Phase 1 PASSED" in writer.feedback[0]
 
     @patch("agent.loop.api.run_phase")
     def test_api_error_is_fed_back(self, run_phase, tmp_path):
@@ -380,17 +402,6 @@ class TestLoop:
         assert not outcomes[0].passed and "unusable" in outcomes[0].reason
         run_phase.assert_not_called()
 
-    @patch("agent.loop.queue_paper")
-    @patch("agent.loop.api.run_phase")
-    def test_queue_paper_flag_calls_paper_add(self, run_phase, queue, tmp_path, capsys):
-        run_phase.side_effect = [_phase1(), _phase2()]
-        cfg = _config(tmp_path, queue_paper=True, trinity="trin")
-
-        outcomes = run(cfg, _log(tmp_path), writer_factory=lambda: FakeWriter([good]))
-
-        queue.assert_called_once_with(outcomes[0].name, outcomes[0].paths, "trin")
-        assert "submit_strategy.sh" not in capsys.readouterr().out
-
     def test_strategy_names_are_unique_identifiers(self, tmp_path):
         with patch("agent.loop.api.run_phase", return_value=_phase1(False)):
             cfg = Config(max_strategies=2, max_iterations=1, api_url="http://api")
@@ -405,21 +416,33 @@ def api_name_ok(name):
 
 
 class TestHandOff:
-    def test_commands_never_force(self, tmp_path):
+    def test_command_is_submit_script_never_force(self, tmp_path):
         paths = {"code": tmp_path / "S.py", "phase1": tmp_path / "S.phase1.json", "phase2": tmp_path / "S.phase2.json"}
-        cmds = paper_add_commands("S", paths, "trinity")
-        assert cmds[0] == f"scripts/submit_strategy.sh {tmp_path / 'S.py'}"
-        assert "paper-add --strategy S" in cmds[1] and "--force" not in " ".join(cmds)
+        assert final_test_command(paths) == f"scripts/submit_strategy.sh {tmp_path / 'S.py'}"
 
-    @patch("agent.loop.subprocess.run")
-    def test_queue_paper_runs_scp_then_paper_add_then_cleans_up(self, sp_run, tmp_path):
-        paths = {"code": tmp_path / "S.py", "phase1": tmp_path / "S.phase1.json", "phase2": tmp_path / "S.phase2.json"}
-        queue_paper("S", paths, "trinity")
-        cmds = [c.args[0] for c in sp_run.call_args_list]
-        assert cmds[0][0] == "scp" and cmds[0][-1] == "trinity:/data/services/trading/paper/"
-        assert cmds[1][:2] == ["ssh", "trinity"] and "paper-add" in cmds[1] and "--force" not in cmds[1]
-        assert "promote" not in " ".join(cmds[1])
-        assert cmds[2][:3] == ["ssh", "trinity", "rm"]
+
+class TestNoFinalTest:
+    """The agent must never see the held-back data: no path to phase 3."""
+
+    @patch("agent.backtest_client.httpx.post")
+    def test_run_phase_refuses_phase_3(self, post):
+        with pytest.raises(ValueError, match="final test"):
+            api.run_phase("S", "code", 3)
+        post.assert_not_called()
+
+    def test_no_phase_3_in_agent_source(self):
+        import agent
+        for path in Path(agent.__file__).parent.glob("*.py"):
+            src = path.read_text()
+            assert "run_phase(name, code, 3" not in src and '"phase": 3' not in src, path
+        assert api.AGENT_PHASES == (1, 2)
+
+    def test_no_paper_add_code_path(self):
+        """Paper now needs the final test first, so the agent no longer queues anything."""
+        import agent.cli, agent.loop
+        for mod in (agent.cli, agent.loop):
+            src = Path(mod.__file__).read_text()
+            assert "trading_client" not in src and "subprocess" not in src and "queue_paper" not in src
 
 
 class TestCli:
@@ -428,11 +451,15 @@ class TestCli:
     def test_run_passes_options(self, runlog, run_mock, monkeypatch):
         run_mock.return_value = [SimpleNamespace(passed=False)]
         rc = main(["run", "--seed", "a", "--seed", "b", "--max-strategies", "3", "--max-phase2", "1",
-                   "--model", "m", "--api-url", "http://a", "--queue-paper"])
+                   "--model", "m", "--api-url", "http://a"])
         assert rc == 1
         cfg = run_mock.call_args.args[0]
         assert cfg.seeds == ["a", "b"] and cfg.max_strategies == 3 and cfg.max_phase2 == 1
-        assert cfg.model == "m" and cfg.api_url == "http://a" and cfg.queue_paper is True
+        assert cfg.model == "m" and cfg.api_url == "http://a"
+
+    def test_queue_paper_flag_is_gone(self):
+        with pytest.raises(SystemExit):
+            main(["run", "--queue-paper"])
 
     def test_no_promote_code_path(self):
         import agent.cli, agent.loop

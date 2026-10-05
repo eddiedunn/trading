@@ -31,6 +31,9 @@ harness runs it and reports back.
 
 ## Data and venue
 - Pairs: BTC, ETH and SOL USDC perpetuals on Hyperliquid, 4h candles, history from about 2023-12.
+- The most recent 6 months are held back. Phase 1 and Phase 2 never use them and you will never
+  see any result from them. After a strategy passes Phase 2, a human may run it once on that
+  held-back data as the final test; that result decides whether it goes further.
 - Columns in the `df` passed to `generate_signals`: timestamp, open, high, low, close, volume.
   Freqtrade's `dataframe` names the time column `date` instead, so keep the logic to the price and
   volume columns and both phases see the same thing.
@@ -63,16 +66,24 @@ harness runs it and reports back.
 - Shorts are optional; if you use them, set `can_short = True` and populate enter_short/exit_short.
 
 ## Gates
-- Phase 1 (fast filter over the whole history): {PHASE1_GATE}.
-- Phase 2 (Freqtrade walk-forward over three consecutive windows): {PHASE2_GATE}.
-  You will see metrics for the earlier windows and only pass/fail for the final out-of-sample window.
+- Phase 1 (fast filter over the development history): {PHASE1_GATE}.
+- The Sharpe bar rises with every attempt in the campaign: each distinct file that reaches Phase 1,
+  from any strategy, counts, and a file that fails Phase 1 still counts. Many small tweaks spend the budget
+  and raise the bar for everything after them; a few well-reasoned attempts get further.
+- A strategy must beat buy-and-hold on Sharpe. Holding every pair equally is the benchmark, and
+  each result shows its Sharpe next to yours plus your beta to it. With a beta near 1 the result is
+  mostly market exposure; the edge is whatever buy-and-hold does not already give.
+- Phase 2 (Freqtrade over three consecutive development periods): {PHASE2_GATE}.
+  You see every period's metrics.
 
 ## How to work
 - Start from the hypothesis you are given and make it concrete. Explain in the module docstring
   what edge the strategy is trying to capture and why it should hold across all three pairs.
+- Each submission is an attempt that raises the bar. Think the idea through before replying rather
+  than probing the backtest with variations.
 - Do not tune to the reported numbers. When a result comes back, change the idea or its structure
   (filter, exit rule, holding logic), not just the constants, and do not add per-pair special cases.
-  A strategy that fits the past by having many knobs will fail the later windows.
+  A strategy that fits the past by having many knobs will fail the held-back data.
 - Prefer round, conventional parameter values. Fewer trades with a clearer edge beat many marginal ones,
   but the Phase 1 gate needs more than 30 trades across the three pairs combined.
 - Keep the class name the same across revisions of the same strategy.
