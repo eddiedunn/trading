@@ -20,11 +20,11 @@
   "trading_mode": "futures",
   "margin_mode": "isolated",
   "stake_currency": "USDC",
-  "stake_amount": 33,
+  "stake_amount": "unlimited",
   "max_open_trades": 3,
   "timeframe": "4h",
   "dry_run": true,
-  "dry_run_wallet": 100,
+  "dry_run_wallet": 1000,
   "entry_pricing": {
     "price_side": "same"
   },

@@ -46,3 +46,11 @@ def test_strategies_declare_their_own_stoploss():
         text = path.read_text()
         assert "    stoploss = " in text, path
         assert "    minimal_roi = " in text, path
+
+
+def test_backtest_config_splits_balance_across_three_slots():
+    """"unlimited" stakes balance / (max_open_trades - open trades), so all three can open."""
+    cfg = json.loads((ROOT / "config" / "backtest.json").read_text())
+    assert cfg["stake_amount"] == "unlimited"
+    assert cfg["max_open_trades"] == 3
+    assert cfg["dry_run_wallet"] >= 1000

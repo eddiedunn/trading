@@ -1,15 +1,17 @@
 """Unit tests for Phase 2 walk-forward validation.
 
-Tests gate logic for profit_factor and max_drawdown per window,
-result aggregation across 3 windows, and Freqtrade result parsing.
+Tests the development periods, the per-period gates, the range check and
+Freqtrade result parsing.
 """
 
 import json
 import zipfile
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from backtest_api.walk_forward import (
@@ -19,7 +21,13 @@ from backtest_api.walk_forward import (
     _extract_max_drawdown,
     MIN_PROFIT_FACTOR,
     MAX_DRAWDOWN,
+    MIN_TRADES,
+    CANDLE,
+    PAIRS,
+    WARMUP,
+    common_candle_range,
     default_windows,
+    ft_timerange,
 )
 
 
@@ -171,166 +179,177 @@ class TestRunFreqtradeBacktest:
         assert "20230101-20240601" in call_args
 
 
-class TestDefaultWindows:
-    """Windows are anchored to today because Hyperliquid history is short."""
+def _write_feathers(data_dir: Path, first: str, last: str) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts = pd.date_range(first, last, freq="4h", tz="UTC")
+    for i, pair in enumerate(PAIRS):
+        close = 100.0 * (1 + i) * np.exp(np.cumsum(np.sin(np.arange(len(ts)) / 7) * 0.01))
+        pd.DataFrame({"timestamp": ts, "open": close, "high": close, "low": close,
+                      "close": close, "volume": 1.0}).to_feather(data_dir / f"{pair}.feather")
 
-    def test_windows_are_contiguous_and_end_today(self):
-        windows = default_windows(date(2026, 10, 2))
-        assert [w[2] for w in windows] == ["in-sample", "validation", "out-of-sample"]
-        assert windows[-1][1] == "20261002"
+
+@pytest.fixture
+def box_data(tmp_path, monkeypatch):
+    """Feathers shaped like the box's on 2026-10-05: 2023-12-16 04:00 to 2026-10-05 16:00."""
+    monkeypatch.setenv("TRADING_DATA_DIR", str(tmp_path / "data"))
+    _write_feathers(tmp_path / "data", "2023-12-16 04:00", "2026-10-05 16:00")
+    return tmp_path / "data"
+
+
+def _ft_time(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _result(start, end, *, trades=20, pf=1.5, dd=0.10, profit=0.05, shift=timedelta(0)):
+    """A Freqtrade result for the window [start, end) (end exclusive)."""
+    return {"strategy": {"S": {
+        "total_trades": trades, "profit_factor": pf, "max_drawdown_account": dd,
+        "profit_total": profit,
+        "backtest_start": _ft_time(start + shift), "backtest_end": _ft_time(end - CANDLE),
+    }}}
+
+
+HOLDOUT = datetime(2026, 4, 6, tzinfo=timezone.utc)
+
+
+class TestDefaultWindows:
+    """Three equal, consecutive periods inside the development data."""
+
+    def test_common_candle_range_reads_feathers(self, box_data):
+        first, last = common_candle_range()
+        assert first == datetime(2023, 12, 16, 4, tzinfo=timezone.utc)
+        assert last == datetime(2026, 10, 5, 16, tzinfo=timezone.utc)
+
+    def test_periods_are_equal_consecutive_and_labelled(self, box_data):
+        windows = default_windows()
+        assert [w[2] for w in windows] == ["period 1", "period 2", "period 3"]
         assert windows[0][1] == windows[1][0]
         assert windows[1][1] == windows[2][0]
+        lengths = {end - start for start, end, _ in windows}
+        assert len(lengths) == 1
+        assert lengths.pop() % CANDLE == timedelta(0)
 
-    def test_windows_stay_inside_kept_history(self):
-        """History is kept from 2023-12; the in-sample window must not start before it."""
-        assert default_windows(date(2026, 10, 2))[0][0] >= "20231216"
+    def test_period_1_leaves_room_for_warmup(self, box_data):
+        first, _ = common_candle_range()
+        start = default_windows()[0][0]
+        assert start >= first + WARMUP
+        assert start - (first + WARMUP) < 3 * CANDLE  # only the remainder is dropped
+
+    def test_no_period_touches_the_holdout(self, box_data):
+        windows = default_windows()
+        assert windows[-1][1] == HOLDOUT
+        for start, end, _ in windows:
+            last_candle = end - CANDLE
+            assert last_candle < HOLDOUT
+            # Freqtrade keeps candles with open time <= the timerange stop.
+            stop = int(ft_timerange(start, last_candle).split("-")[1])
+            assert stop < HOLDOUT.timestamp()
+
+    def test_box_dates(self, box_data):
+        """The periods produced from the box's data as of 2026-10-05."""
+        assert [(s, e) for s, e, _ in default_windows()] == [
+            (datetime(2024, 1, 5, 12, tzinfo=timezone.utc), datetime(2024, 10, 5, 8, tzinfo=timezone.utc)),
+            (datetime(2024, 10, 5, 8, tzinfo=timezone.utc), datetime(2025, 7, 6, 4, tzinfo=timezone.utc)),
+            (datetime(2025, 7, 6, 4, tzinfo=timezone.utc), HOLDOUT),
+        ]
 
 
 class TestWalkForwardWindow:
-    """Test walk-forward across 3 windows with gate logic."""
+    """Phase 2 gates per period."""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, box_data):
+        self.windows = default_windows()
+
+    def _run(self, mock_backtest, per_window=None):
+        """per_window: kwargs for _result keyed by period index."""
+        per_window = per_window or {}
+        mock_backtest.side_effect = [
+            _result(s, e, **per_window.get(i, {})) for i, (s, e, _) in enumerate(self.windows)
+        ]
+        return walk_forward_test("TestStrat")
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
     def test_all_windows_pass(self, mock_backtest):
-        """All windows pass → overall pass."""
-        # Mock each window's results
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
-            {"strategy": {"S": {"profit_factor": 1.25, "max_drawdown": -0.18}}},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
+        outcome = self._run(mock_backtest)
         assert outcome["passed"] is True
         assert len(outcome["windows"]) == 3
         assert all(w["passed"] for w in outcome["windows"])
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_one_window_fails_profit_factor(self, mock_backtest):
-        """One window fails PF gate → overall fail."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},  # pass
-            {"strategy": {"S": {"profit_factor": 1.0, "max_drawdown": -0.18}}},  # fail PF < 1.2
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},  # pass
-        ]
-        mock_backtest.side_effect = results
+    def test_reports_stats_and_actual_range(self, mock_backtest):
+        w = self._run(mock_backtest, {0: {"trades": 12, "pf": 1.33333, "dd": 0.15678, "profit": 0.0712}})["windows"][0]
+        start, end, _ = self.windows[0]
+        assert w["label"] == "period 1"
+        assert w["timerange"] == ft_timerange(start, end - CANDLE)
+        assert (w["trades"], w["profit_total"], w["profit_factor"], w["max_drawdown"]) == (12, 0.0712, 1.3333, -0.1568)
+        assert w["backtest_start"] == _ft_time(start)
+        assert w["backtest_end"] == _ft_time(end - CANDLE)
+        assert set(w["gate"]) == {"total_trades", "profit_factor", "max_drawdown", "profit_total"}
 
-        outcome = walk_forward_test("TestStrat")
-
+    @pytest.mark.parametrize("kwargs, check", [
+        ({"pf": MIN_PROFIT_FACTOR - 0.01}, "profit_factor"),
+        ({"dd": -MAX_DRAWDOWN + 0.01}, "max_drawdown"),
+        ({"trades": MIN_TRADES - 1}, "total_trades"),
+        ({"profit": 0.0}, "profit_total"),
+        ({"profit": -0.01}, "profit_total"),
+    ])
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_each_gate_fails_the_window(self, mock_backtest, kwargs, check):
+        outcome = self._run(mock_backtest, {1: kwargs})
         assert outcome["passed"] is False
         assert outcome["windows"][1]["passed"] is False
+        assert outcome["windows"][1]["gate"][check]["passed"] is False
         assert outcome["windows"][0]["passed"] is True
-        assert outcome["windows"][2]["passed"] is True
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_one_window_fails_drawdown(self, mock_backtest):
-        """One window fails DD gate → overall fail."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
-            {"strategy": {"S": {"profit_factor": 1.25, "max_drawdown": -0.30}}},  # fail DD < -0.25
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
+    def test_boundaries_pass(self, mock_backtest):
+        outcome = self._run(mock_backtest, {0: {"pf": MIN_PROFIT_FACTOR, "dd": -MAX_DRAWDOWN, "trades": MIN_TRADES}})
+        assert outcome["windows"][0]["passed"] is True
+
+    @pytest.mark.parametrize("pf", [0, None])
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_no_losing_trades_passes_profit_factor(self, mock_backtest, pf):
+        w = self._run(mock_backtest, {0: {"pf": pf}})["windows"][0]
+        assert w["passed"] is True
+        assert w["gate"]["profit_factor"] == {"value": None, "threshold": MIN_PROFIT_FACTOR, "passed": True}
+
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_missing_profit_factor_with_too_few_trades_fails(self, mock_backtest):
+        w = self._run(mock_backtest, {0: {"pf": 0, "trades": 5}})["windows"][0]
+        assert w["gate"]["profit_factor"]["passed"] is False
+
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_start_gap_fails_window(self, mock_backtest):
+        w = self._run(mock_backtest, {0: {"shift": timedelta(days=2)}})["windows"][0]
+        assert w["passed"] is False
+        assert "wrong range" in w["error"] and "started" in w["error"]
+
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_one_candle_off_is_tolerated(self, mock_backtest):
+        assert self._run(mock_backtest, {0: {"shift": CANDLE}})["windows"][0]["passed"] is True
+
+    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
+    def test_end_gap_fails_window(self, mock_backtest):
+        results = [_result(s, e) for s, e, _ in self.windows]
+        results[2]["strategy"]["S"]["backtest_end"] = "2026-04-02 20:00:00"
         mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
-        assert outcome["passed"] is False
-        assert outcome["windows"][1]["passed"] is False
+        w = walk_forward_test("TestStrat")["windows"][2]
+        assert w["passed"] is False
+        assert "ended 2026-04-02 20:00" in w["error"]
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
     def test_window_with_error(self, mock_backtest):
-        """Window with error → overall fail."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
-            {"error": "Insufficient data"},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
+        s, e, _ = self.windows[0]
+        mock_backtest.side_effect = [_result(s, e), {"error": "Insufficient data"}, _result(s, e)]
         outcome = walk_forward_test("TestStrat")
-
         assert outcome["passed"] is False
-        assert outcome["windows"][1]["passed"] is False
-        assert "error" in outcome["windows"][1]
+        assert outcome["windows"][1]["error"] == "Insufficient data"
 
     @patch("backtest_api.walk_forward.run_freqtrade_backtest")
     def test_window_returns_none(self, mock_backtest):
-        """Window returns None → overall fail."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
-            None,
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
+        s, e, _ = self.windows[0]
+        mock_backtest.side_effect = [_result(s, e), None, _result(s, e)]
         outcome = walk_forward_test("TestStrat")
-
         assert outcome["passed"] is False
-        assert outcome["windows"][1]["passed"] is False
         assert outcome["windows"][1]["error"] == "No results"
-
-    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_window_labels_and_timeranges(self, mock_backtest):
-        """Verify window labels and timeranges match default_windows()."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": -0.15}}},
-            {"strategy": {"S": {"profit_factor": 1.25, "max_drawdown": -0.18}}},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
-        for i, (start, end, label) in enumerate(default_windows()):
-            assert outcome["windows"][i]["label"] == label
-            assert outcome["windows"][i]["timerange"] == f"{start}-{end}"
-
-    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_metrics_rounded(self, mock_backtest):
-        """Metrics in output are rounded to 4 decimals."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.33333, "max_drawdown": -0.15678}}},
-            {"strategy": {"S": {"profit_factor": 1.25555, "max_drawdown": -0.18901}}},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
-        for w in outcome["windows"]:
-            if "profit_factor" in w:
-                # Verify it's a rounded value (max 4 decimals)
-                pf_str = str(w["profit_factor"])
-                decimals = len(pf_str.split(".")[-1]) if "." in pf_str else 0
-                assert decimals <= 4
-
-    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_boundary_profit_factor(self, mock_backtest):
-        """Test PF boundary at exactly MIN_PROFIT_FACTOR."""
-        results = [
-            {"strategy": {"S": {"profit_factor": MIN_PROFIT_FACTOR, "max_drawdown": -0.15}}},
-            {"strategy": {"S": {"profit_factor": MIN_PROFIT_FACTOR - 0.01, "max_drawdown": -0.15}}},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
-        assert outcome["windows"][0]["passed"] is True  # exactly at threshold
-        assert outcome["windows"][1]["passed"] is False  # just below threshold
-
-    @patch("backtest_api.walk_forward.run_freqtrade_backtest")
-    def test_boundary_max_drawdown(self, mock_backtest):
-        """Test DD boundary at exactly MAX_DRAWDOWN."""
-        results = [
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": MAX_DRAWDOWN}}},
-            {"strategy": {"S": {"profit_factor": 1.3, "max_drawdown": MAX_DRAWDOWN - 0.01}}},
-            {"strategy": {"S": {"profit_factor": 1.5, "max_drawdown": -0.12}}},
-        ]
-        mock_backtest.side_effect = results
-
-        outcome = walk_forward_test("TestStrat")
-
-        assert outcome["windows"][0]["passed"] is True  # exactly at threshold
-        assert outcome["windows"][1]["passed"] is False  # worse than threshold
