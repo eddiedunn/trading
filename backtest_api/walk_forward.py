@@ -1,7 +1,8 @@
 """Phase 2 — Freqtrade walk-forward validation.
 
-Runs strategy through 3 time windows (in-sample, validation, out-of-sample)
-via Freqtrade backtesting in a podman container. Only strategies that pass
+Runs a strategy through 3 equal, consecutive periods of the development data
+(before holdout_start()) via Freqtrade in a podman container. Nothing is fitted,
+so the periods are just "period 1/2/3". Only strategies that pass
 Phase 1 should reach here.
 
 Paths come from env so the same code runs on a laptop and inside the
@@ -14,22 +15,30 @@ import json
 import os
 import subprocess
 import zipfile
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pandas as pd
+
+from backtest_api.periods import holdout_start
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 FREQTRADE_IMAGE = "docker.io/freqtradeorg/freqtrade:stable"
 
-# Minimum thresholds per window
+# Gates, checked in every Phase 2 period.
 MIN_PROFIT_FACTOR = 1.2
 MAX_DRAWDOWN = -0.25
+MIN_TRADES = 10
 
-# Hyperliquid only serves the last 5000 candles, and history is kept from
-# 2023-12, so windows are anchored to today rather than fixed dates.
-IN_SAMPLE_DAYS = 365
-VALIDATION_DAYS = 182
-OUT_OF_SAMPLE_DAYS = 182
+CANDLE = timedelta(hours=4)
+N_PERIODS = 3
+# Skip this much data at the start so Freqtrade can load indicator warm-up
+# candles before period 1. If a strategy needs more, Freqtrade moves the start
+# forward and the range check below fails the period.
+WARMUP = timedelta(days=20)
+
+PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
 
 
 def _path(env: str, default: Path) -> Path:
@@ -52,18 +61,51 @@ def config_dir() -> Path:
     return _path("TRADING_CONFIG_DIR", _REPO_ROOT / "config")
 
 
-def default_windows(today: date | None = None) -> list[tuple[str, str, str]]:
-    """Return (start, end, label) windows ending today, oldest first."""
-    end = today or date.today()
-    oos_start = end - timedelta(days=OUT_OF_SAMPLE_DAYS)
-    val_start = oos_start - timedelta(days=VALIDATION_DAYS)
-    is_start = val_start - timedelta(days=IN_SAMPLE_DAYS)
-    fmt = "%Y%m%d"
+def data_dir() -> Path:
+    """The Phase 1 4h feathers (``<PAIR>_4h.feather`` with a ``timestamp`` column)."""
+    return _path("TRADING_DATA_DIR", _REPO_ROOT / "data")
+
+
+def common_candle_range(pairs: list[str] | None = None) -> tuple[datetime, datetime]:
+    """(first, last) 4h candle open time that every pair has, in UTC."""
+    firsts, lasts = [], []
+    for pair in pairs or PAIRS:
+        path = data_dir() / f"{pair}.feather"
+        ts = pd.to_datetime(pd.read_feather(path, columns=["timestamp"])["timestamp"], utc=True)
+        firsts.append(ts.min())
+        lasts.append(ts.max())
+    return max(firsts).to_pydatetime(), min(lasts).to_pydatetime()
+
+
+def _holdout_start_dt() -> datetime:
+    return datetime.combine(holdout_start(), datetime.min.time(), tzinfo=timezone.utc)
+
+
+def default_windows(first_candle: datetime | None = None) -> list[tuple[datetime, datetime, str]]:
+    """Three equal, consecutive (start, end, label) periods covering the development data.
+
+    ``end`` is exclusive: the period's last candle opens at ``end - CANDLE``.
+    Period 1 starts WARMUP after the first common candle; period 3 ends at
+    holdout_start(), so no period ever sees a holdout candle. Leftover candles
+    that don't divide by three are dropped from the start.
+    """
+    first = first_candle or common_candle_range()[0]
+    end = _holdout_start_dt()
+    candles = (end - (first + WARMUP)) // CANDLE
+    per = candles // N_PERIODS
+    if per <= 0:
+        raise ValueError(f"No development data between {first} + warm-up and {end}")
+    start = end - N_PERIODS * per * CANDLE
     return [
-        (is_start.strftime(fmt), val_start.strftime(fmt), "in-sample"),
-        (val_start.strftime(fmt), oos_start.strftime(fmt), "validation"),
-        (oos_start.strftime(fmt), end.strftime(fmt), "out-of-sample"),
+        (start + i * per * CANDLE, start + (i + 1) * per * CANDLE, f"period {i + 1}")
+        for i in range(N_PERIODS)
     ]
+
+
+def ft_timerange(start: datetime, last_candle: datetime) -> str:
+    """Freqtrade timerange in epoch seconds. Freqtrade keeps candles with
+    start <= open time <= stop, so the stop is the last candle to include."""
+    return f"{int(start.timestamp())}-{int(last_candle.timestamp())}"
 
 
 def run_freqtrade_backtest(
@@ -116,45 +158,123 @@ def _load_latest_result(out_dir: Path) -> dict | None:
         return json.loads(zf.read(name))
 
 
+def strategy_block(stats: dict) -> dict:
+    """The per-strategy stats Freqtrade nests under ``strategy.<name>``."""
+    try:
+        for block in stats.get("strategy", {}).values():
+            return block
+        return stats
+    except (AttributeError, TypeError):
+        return {}
+
+
+def _parse_ft_time(value) -> datetime | None:
+    """Freqtrade writes backtest_start/end as naive UTC strings."""
+    if not value:
+        return None
+    ts = pd.Timestamp(value)
+    return (ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")).to_pydatetime()
+
+
+def range_error(block: dict, start: datetime, last_candle: datetime) -> str | None:
+    """Fail when Freqtrade actually tested a different range than asked (more than
+    one candle off), e.g. missing data or a start moved for warm-up candles."""
+    got_start = _parse_ft_time(block.get("backtest_start"))
+    got_end = _parse_ft_time(block.get("backtest_end"))
+    if got_start is None or got_end is None:
+        return "Freqtrade result has no backtest_start/backtest_end"
+    problems = []
+    if abs(got_start - start) > CANDLE:
+        problems.append(f"started {got_start:%Y-%m-%d %H:%M} instead of {start:%Y-%m-%d %H:%M}")
+    if abs(got_end - last_candle) > CANDLE:
+        problems.append(f"ended {got_end:%Y-%m-%d %H:%M} instead of {last_candle:%Y-%m-%d %H:%M}")
+    if problems:
+        return ("Freqtrade tested the wrong range (missing data, or warm-up moved the start): "
+                + "; ".join(problems))
+    return None
+
+
+def _check(value, threshold, passed: bool) -> dict:
+    return {"value": value, "threshold": threshold, "passed": bool(passed)}
+
+
+def core_gates(block: dict, min_trades: int) -> dict:
+    """The trade-count, profit factor, drawdown and profit gates shared by Phase 2
+    and the final test, as {check: {value, threshold, passed}}.
+
+    Freqtrade reports profit factor as 0/None when no trade lost. That is not a
+    bad profit factor, so it passes when the trade and profit gates pass.
+    """
+    trades = int(block.get("total_trades") or 0)
+    profit = float(block.get("profit_total") or 0.0)
+    raw_pf = block.get("profit_factor")
+    dd = _extract_max_drawdown({"strategy": {"s": block}})
+    enough_trades = trades >= min_trades
+    profitable = profit > 0
+    if not raw_pf and enough_trades and profitable:
+        pf_value, pf_passed = None, True  # no losing trades
+    else:
+        pf_value = round(float(raw_pf or 0.0), 4)
+        pf_passed = pf_value >= MIN_PROFIT_FACTOR
+    return {
+        "total_trades": _check(trades, min_trades, enough_trades),
+        "profit_factor": _check(pf_value, MIN_PROFIT_FACTOR, pf_passed),
+        "max_drawdown": _check(round(dd, 4), MAX_DRAWDOWN, dd >= MAX_DRAWDOWN),
+        "profit_total": _check(round(profit, 4), 0, profitable),
+    }
+
+
+def run_window(strategy_name: str, start: datetime, end: datetime, min_trades: int) -> dict:
+    """Backtest [start, end) and apply the core gates. ``end`` is exclusive."""
+    last_candle = end - CANDLE
+    tr = ft_timerange(start, last_candle)
+    window = {
+        "timerange": tr,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "last_candle": last_candle.isoformat(),
+    }
+    stats = run_freqtrade_backtest(strategy_name, tr)
+    if stats is None or "error" in stats:
+        error = stats.get("error", "No results produced") if stats else "No results"
+        return {**window, "passed": False, "error": error, "stats": stats}
+
+    block = strategy_block(stats)
+    gates = core_gates(block, min_trades)
+    result = {
+        **window,
+        "backtest_start": block.get("backtest_start"),
+        "backtest_end": block.get("backtest_end"),
+        "trades": gates["total_trades"]["value"],
+        "profit_total": gates["profit_total"]["value"],
+        "profit_factor": gates["profit_factor"]["value"],
+        "max_drawdown": gates["max_drawdown"]["value"],
+        "gate": gates,
+        "passed": all(g["passed"] for g in gates.values()),
+        "stats": stats,
+    }
+    error = range_error(block, start, last_candle)
+    if error:
+        result.update(passed=False, error=error)
+    return result
+
+
 def walk_forward_test(
     strategy_name: str,
     timerange: str | None = None,
-    windows: list[tuple[str, str, str]] | None = None,
+    windows: list[tuple[datetime, datetime, str]] | None = None,
 ) -> dict:
-    """Run walk-forward validation across 3 windows. Returns pass/fail + per-window stats."""
-    windows_results = []
-    passed = True
+    """Run Phase 2 over 3 development periods. Returns pass/fail + per-period stats.
 
+    ``timerange`` is accepted for API compatibility and ignored: the periods
+    are fixed by the data and holdout_start().
+    """
+    results = []
     for start, end, label in windows or default_windows():
-        stats = run_freqtrade_backtest(strategy_name, f"{start}-{end}")
-
-        if stats is None or "error" in stats:
-            windows_results.append({
-                "label": label,
-                "timerange": f"{start}-{end}",
-                "passed": False,
-                "error": stats.get("error", "No results produced") if stats else "No results",
-            })
-            passed = False
-            continue
-
-        # Extract metrics from Freqtrade results format
-        pf = _extract_profit_factor(stats)
-        dd = _extract_max_drawdown(stats)
-
-        window_passed = pf >= MIN_PROFIT_FACTOR and dd >= MAX_DRAWDOWN
-        if not window_passed:
-            passed = False
-
-        windows_results.append({
-            "label": label,
-            "timerange": f"{start}-{end}",
-            "passed": window_passed,
-            "profit_factor": round(pf, 4),
-            "max_drawdown": round(dd, 4),
-        })
-
-    return {"passed": passed, "windows": windows_results}
+        result = run_window(strategy_name, start, end, MIN_TRADES)
+        result.pop("stats", None)
+        results.append({"label": label, **result})
+    return {"passed": all(w["passed"] for w in results), "windows": results}
 
 
 def _extract_profit_factor(stats: dict) -> float:
