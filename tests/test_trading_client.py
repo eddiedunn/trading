@@ -87,81 +87,77 @@ class TestWriteActive:
 class TestCopyStrategy:
     """Test strategy file copying."""
 
-    @patch("live.trading_client.shutil.copy2")
-    @patch("live.trading_client.LIVE_DIR")
-    @patch("live.trading_client.STRATEGIES_DIR")
-    def test_copy_from_strategies_dir(self, mock_strat_dir, mock_live_dir, mock_copy):
+    @pytest.fixture
+    def dirs(self, tmp_path, monkeypatch):
+        strat = tmp_path / "strategies"
+        live = tmp_path / "live"
+        (strat / "candidates").mkdir(parents=True)
+        (strat / "NullStrategy.py").write_text("null\n")
+        monkeypatch.setattr("live.trading_client.STRATEGIES_DIR", strat)
+        monkeypatch.setattr("live.trading_client.LIVE_DIR", live)
+        return strat, live
+
+    def test_copy_from_strategies_dir(self, dirs):
         """Copy strategy from strategies/<name>.py when it exists."""
-        mock_src = MagicMock()
-        mock_src.exists.return_value = True
-        mock_strat_dir.__truediv__.return_value = mock_src
-        mock_dest = MagicMock()
-        mock_live_dir.__truediv__.return_value = mock_dest
-        mock_live_dir.glob.return_value = []
+        strat, live = dirs
+        (strat / "TestStrat.py").write_text("top\n")
 
         _copy_strategy("TestStrat")
 
-        mock_live_dir.mkdir.assert_called_once_with(parents=True, exist_ok=True)
-        mock_live_dir.__truediv__.assert_called_with("TestStrat.py")
-        mock_copy.assert_called_once_with(mock_src, mock_dest)
+        assert (live / "TestStrat.py").read_text() == "top\n"
 
-    @patch("live.trading_client.shutil.copy2")
-    @patch("live.trading_client.LIVE_DIR")
-    @patch("live.trading_client.STRATEGIES_DIR")
-    def test_copy_from_candidates_fallback(self, mock_strat_dir, mock_live_dir, mock_copy):
+    def test_copy_from_candidates_fallback(self, dirs):
         """Fall back to candidates/ when strategies/<name>.py not found."""
-        mock_src1 = MagicMock()
-        mock_src1.exists.return_value = False
-        mock_candidates = MagicMock()
-        mock_src2 = MagicMock()
-        mock_candidates.__truediv__.return_value = mock_src2
-        mock_src2.exists.return_value = True
-        mock_strat_dir.__truediv__.side_effect = [mock_src1, mock_candidates]
-        mock_live_dir.glob.return_value = []
+        strat, live = dirs
+        (strat / "candidates" / "TestStrat.py").write_text("cand\n")
 
         _copy_strategy("TestStrat")
 
-        # First positional arg of copy2 is the candidates source
-        assert mock_copy.call_args[0][0] is mock_src2
+        assert (live / "TestStrat.py").read_text() == "cand\n"
 
-    @patch("live.trading_client.shutil.copy2")
-    @patch("live.trading_client.LIVE_DIR")
-    @patch("live.trading_client.STRATEGIES_DIR")
-    def test_copy_cleans_stale_py_files(self, mock_strat_dir, mock_live_dir, mock_copy):
+    def test_copy_cleans_stale_py_files(self, dirs):
         """Stale .py files in LIVE_DIR are removed before copy."""
-        mock_src = MagicMock()
-        mock_src.exists.return_value = True
-        mock_strat_dir.__truediv__.return_value = mock_src
-        stale1, stale2 = MagicMock(), MagicMock()
-        mock_live_dir.glob.return_value = [stale1, stale2]
+        strat, live = dirs
+        (strat / "TestStrat.py").write_text("new\n")
+        live.mkdir()
+        (live / "OldStrat.py").write_text("old\n")
+        (live / "config.json").write_text("{}")
 
         _copy_strategy("TestStrat")
 
-        stale1.unlink.assert_called_once()
-        stale2.unlink.assert_called_once()
-        mock_live_dir.glob.assert_called_once_with("*.py")
+        assert not (live / "OldStrat.py").exists()
+        assert (live / "config.json").exists()
 
-    @patch("live.trading_client.shutil.copy2")
-    @patch("live.trading_client.LIVE_DIR")
-    @patch("live.trading_client.STRATEGIES_DIR")
-    def test_copy_fails_when_file_not_found(self, mock_strat_dir, mock_live_dir, mock_copy):
+    def test_copy_keeps_null_strategy(self, dirs):
+        """NullStrategy.py stays in the live slot so retire can fall back to it."""
+        strat, live = dirs
+        (strat / "TestStrat.py").write_text("new\n")
+        live.mkdir()
+        (live / "NullStrategy.py").write_text("live null\n")
+
+        _copy_strategy("TestStrat")
+
+        assert (live / "NullStrategy.py").read_text() == "live null\n"
+
+    def test_copy_restores_missing_null_strategy(self, dirs):
+        """A live slot that lost NullStrategy.py gets it back from strategies/."""
+        strat, live = dirs
+        (strat / "TestStrat.py").write_text("new\n")
+
+        _copy_strategy("TestStrat")
+
+        assert (live / "NullStrategy.py").read_text() == "null\n"
+
+    def test_copy_fails_when_file_not_found(self, dirs):
         """Missing source raises before the live slot is touched."""
-        mock_src1 = MagicMock()
-        mock_src1.exists.return_value = False
-        mock_candidates = MagicMock()
-        mock_src2 = MagicMock()
-        mock_candidates.__truediv__.return_value = mock_src2
-        mock_src2.exists.return_value = False
-        mock_strat_dir.__truediv__.side_effect = [mock_src1, mock_candidates]
-        stale = MagicMock()
-        mock_live_dir.glob.return_value = [stale]
+        _, live = dirs
+        live.mkdir()
+        (live / "OldStrat.py").write_text("old\n")
 
         with pytest.raises(FileNotFoundError):
             _copy_strategy("NonExistent")
 
-        stale.unlink.assert_not_called()
-        mock_copy.assert_not_called()
-
+        assert (live / "OldStrat.py").exists()
 
 class TestPromote:
     """Test the promote subcommand."""

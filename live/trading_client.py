@@ -39,9 +39,14 @@ def _copy_strategy(name: str):
     if not src.exists():
         raise FileNotFoundError(f"No strategy file for {name} in {STRATEGIES_DIR} or its candidates/")
     LIVE_DIR.mkdir(parents=True, exist_ok=True)
+    # Keep NullStrategy.py in the live slot so retire can fall back to it.
+    null_name = f"{NULL_STRATEGY}.py"
     for stale in LIVE_DIR.glob("*.py"):
-        stale.unlink()
+        if stale.name != null_name:
+            stale.unlink()
     shutil.copy2(src, LIVE_DIR / f"{name}.py")
+    if not (LIVE_DIR / null_name).exists() and (STRATEGIES_DIR / null_name).exists():
+        shutil.copy2(STRATEGIES_DIR / null_name, LIVE_DIR / null_name)
 
 
 def promote(name: str):

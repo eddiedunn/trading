@@ -7,7 +7,7 @@
   hosts: trinity
   gather_facts: true
   vars:
-    retired_dir: "~/.config/containers/systemd/retired-2026-10-02"
+    retired_dir: "~/.config/containers/retired-2026-10-02"
   tasks:
     - name: Stop legacy services
       ansible.builtin.systemd_service:
@@ -43,7 +43,7 @@
   hosts: tela
   gather_facts: true
   vars:
-    retired_dir: "~/.config/containers/systemd/retired-2026-10-02"
+    retired_dir: "~/.config/containers/retired-2026-10-02"
   tasks:
     - name: Stop legacy backtest-api.service
       ansible.builtin.systemd_service:
