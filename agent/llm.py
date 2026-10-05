@@ -1,17 +1,21 @@
-"""Thin wrapper around the Anthropic SDK: one conversation per strategy.
+"""Thin wrapper around the `claude` CLI: one conversation per strategy.
 
-The history is append-only so Claude sees every earlier version and the
-feedback it got, and so prompt caching keeps working.
+Runs `claude -p` so calls go through Eddie's Claude subscription login, not an
+API key. The first call starts a session; each revision resumes it, so Claude
+sees every earlier version and the feedback it got.
 """
 
+import json
+import os
 import re
-
-import anthropic
+import subprocess
+import tempfile
 
 from agent.prompts import initial_prompt, revision_prompt, system_prompt
 
 DEFAULT_MODEL = "claude-opus-5-5"
-MAX_TOKENS = 16000
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+TIMEOUT_SECS = 600
 
 _FENCE_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 
@@ -30,13 +34,12 @@ def extract_code(text: str) -> str:
 class StrategyWriter:
     """Drives one Claude conversation that writes and then revises a single strategy."""
 
-    def __init__(self, client: anthropic.Anthropic | None = None, model: str = DEFAULT_MODEL):
-        # The SDK reads ANTHROPIC_API_KEY itself; nothing here handles the secret.
-        self.client = client or anthropic.Anthropic()
+    def __init__(self, model: str = DEFAULT_MODEL, runner=subprocess.run):
         self.model = model
+        self.runner = runner
         self.system = system_prompt()
-        self.messages: list[dict] = []
-        self.usage = {"input_tokens": 0, "output_tokens": 0}
+        self.session_id: str | None = None
+        self.usage = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
     def write(self, seed: str, name: str) -> str:
         return self._ask(initial_prompt(seed, name))
@@ -45,20 +48,31 @@ class StrategyWriter:
         return self._ask(revision_prompt(feedback))
 
     def _ask(self, user_text: str) -> str:
-        self.messages.append({"role": "user", "content": user_text})
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=MAX_TOKENS,
-            system=[{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}],
-            messages=self.messages,
-        )
-        if response.stop_reason == "refusal":
+        cmd = [
+            CLAUDE_BIN, "-p", "--output-format", "json", "--model", self.model,
+            "--system-prompt", self.system,
+            # Text only: no tools, no user/project settings, hooks, MCP servers or skills.
+            "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands",
+        ]
+        if self.session_id:
+            cmd += ["--resume", self.session_id]
+        # Drop any API key so the CLI uses the subscription login.
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        proc = self.runner(cmd, input=user_text, capture_output=True, text=True,
+                           timeout=TIMEOUT_SECS, env=env, cwd=tempfile.gettempdir())
+        try:
+            reply = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            raise ReplyError(f"claude exited {proc.returncode}: {(proc.stderr or proc.stdout)[-500:]}")
+        if reply.get("is_error"):
+            raise ReplyError(f"claude reported an error: {reply.get('result') or reply.get('subtype')}")
+        if reply.get("stop_reason") == "refusal":
             raise ReplyError("Claude declined the request")
-        if response.stop_reason == "max_tokens":
+        if reply.get("stop_reason") == "max_tokens":
             raise ReplyError("Claude's reply was cut off at max_tokens")
-        self.usage["input_tokens"] += response.usage.input_tokens
-        self.usage["output_tokens"] += response.usage.output_tokens
-        text = "".join(b.text for b in response.content if b.type == "text")
-        # Append the full content so thinking blocks (if any) stay with the turn that produced them.
-        self.messages.append({"role": "assistant", "content": response.content})
-        return extract_code(text)
+        self.session_id = reply["session_id"]
+        usage = reply.get("usage") or {}
+        self.usage["input_tokens"] += usage.get("input_tokens", 0)
+        self.usage["output_tokens"] += usage.get("output_tokens", 0)
+        self.usage["cost_usd"] += reply.get("total_cost_usd") or 0.0
+        return extract_code(reply.get("result") or "")

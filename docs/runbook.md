@@ -109,7 +109,8 @@ ssh trinity podman exec trading-postgres psql -U trading -d trading \
 
 ## Strategy agent
 
-`python -m agent run` asks Claude for a strategy in the two-in-one format,
+`python -m agent run` asks Claude (through `claude -p`, so it uses the
+Claude subscription login, not an API key) for a strategy in the two-in-one format,
 checks it locally (parses, has `generate_signals` and the right class, imports
 only pandas/numpy/pandas_ta/freqtrade, at most 6 constants, no negative
 `shift`), posts it to Phase 1, and on failure sends the metrics back for a
@@ -118,7 +119,6 @@ and validation metrics but only pass/fail for the out-of-sample window.
 
 ```bash
 ssh -N -L 8070:127.0.0.1:8070 tela &                 # the API only listens on tela's loopback
-export ANTHROPIC_API_KEY=...                         # the SDK reads it; nothing else does
 uv run python -m agent run --max-strategies 2 --seed "Donchian breakout with a volume filter"
 ```
 

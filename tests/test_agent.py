@@ -122,27 +122,36 @@ class TestLLM:
         assert "class EmaCross(IStrategy)" in text
         assert "Do not tune to the reported numbers" in text
 
-    def test_writer_keeps_history_and_passes_model(self):
-        client = MagicMock()
-        client.messages.create.return_value = SimpleNamespace(
-            stop_reason="end_turn", usage=SimpleNamespace(input_tokens=10, output_tokens=5),
-            content=[SimpleNamespace(type="text", text="```python\nx = 1\n```")])
-        w = StrategyWriter(client=client, model="claude-test")
+    @staticmethod
+    def _cli_reply(text="```python\nx = 1\n```", **extra):
+        body = {"is_error": False, "stop_reason": "end_turn", "session_id": "sess-1", "result": text,
+                "usage": {"input_tokens": 10, "output_tokens": 5}, "total_cost_usd": 0.01, **extra}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(body), stderr="")
+
+    def test_writer_resumes_session_and_passes_model(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "should-not-reach-claude")
+        runner = MagicMock(return_value=self._cli_reply())
+        w = StrategyWriter(model="claude-test", runner=runner)
         assert w.write("idea", "Name") == "x = 1\n"
         assert w.revise("feedback") == "x = 1\n"
-        kwargs = client.messages.create.call_args.kwargs
-        assert kwargs["model"] == "claude-test"
-        # The same list object is passed each time (append-only history), so it now holds both turns.
-        assert [m["role"] for m in w.messages] == ["user", "assistant", "user", "assistant"]
-        assert kwargs["messages"] is w.messages
-        assert "feedback" in w.messages[2]["content"]
-        assert w.usage == {"input_tokens": 20, "output_tokens": 10}
+        first, second = runner.call_args_list
+        assert first.args[0][first.args[0].index("--model") + 1] == "claude-test"
+        assert "--resume" not in first.args[0]
+        assert second.args[0][-2:] == ["--resume", "sess-1"]
+        assert "feedback" in second.kwargs["input"]
+        assert first.args[0][first.args[0].index("--tools") + 1] == ""
+        assert "ANTHROPIC_API_KEY" not in first.kwargs["env"]
+        assert w.usage == {"input_tokens": 20, "output_tokens": 10, "cost_usd": 0.02}
 
     def test_writer_refusal(self):
-        client = MagicMock()
-        client.messages.create.return_value = SimpleNamespace(stop_reason="refusal", usage=None, content=[])
+        runner = MagicMock(return_value=self._cli_reply(stop_reason="refusal"))
         with pytest.raises(ReplyError, match="declined"):
-            StrategyWriter(client=client).write("idea", "Name")
+            StrategyWriter(runner=runner).write("idea", "Name")
+
+    def test_writer_cli_failure(self):
+        runner = MagicMock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="not logged in"))
+        with pytest.raises(ReplyError, match="not logged in"):
+            StrategyWriter(runner=runner).write("idea", "Name")
 
 
 class FakeWriter:
@@ -287,14 +296,9 @@ class TestHandOff:
 
 
 class TestCli:
-    def test_requires_api_key(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        assert main(["run"]) == 2
-
     @patch("agent.cli.run")
     @patch("agent.cli.RunLog")
     def test_run_passes_options(self, runlog, run_mock, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
         run_mock.return_value = [SimpleNamespace(passed=False)]
         rc = main(["run", "--seed", "a", "--seed", "b", "--max-strategies", "3", "--max-phase2", "1",
                    "--model", "m", "--api-url", "http://a", "--queue-paper"])

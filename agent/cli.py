@@ -3,7 +3,7 @@
     python -m agent run --max-strategies 2 --seed "..."     # print the paper-add command on success
     python -m agent run --queue-paper                       # call paper-add on trinity instead
 
-Needs ANTHROPIC_API_KEY and a route to the backtest API (it listens on
+Needs the `claude` CLI logged in (Eddie's subscription) and a route to the backtest API (it listens on
 127.0.0.1:8070 on tela: `ssh -N -L 8070:127.0.0.1:8070 tela`).
 """
 
@@ -43,9 +43,6 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
     if args.cmd == "run":
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("ANTHROPIC_API_KEY is not set", file=sys.stderr)
-            return 2
         cfg = Config(
             seeds=args.seed, max_strategies=args.max_strategies, max_iterations=args.max_iterations,
             max_phase2=args.max_phase2, max_params=args.max_params, model=args.model,

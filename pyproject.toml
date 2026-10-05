@@ -12,7 +12,6 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "psycopg2-binary>=2.9",
     "httpx>=0.28",
-    "anthropic>=1.11.0",
 ]
 
 [project.optional-dependencies]
