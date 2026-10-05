@@ -5,9 +5,10 @@ OHLCV data downloader for Hyperliquid perpetual futures.
 Incrementally appends candles to feather files. Safe to run repeatedly —
 deduplicates on timestamp. Designed to be called by daily cron.
 
-With --freqtrade-dir it also downloads hourly funding rates and writes the
-files Freqtrade's futures backtester needs. Freqtrade cannot download
-Hyperliquid history itself.
+It also downloads hourly funding rates per pair into the data dir as
+<PAIR>_funding_1h.feather (Phase 1 reads these; skip with --no-funding).
+With --freqtrade-dir it also writes the files Freqtrade's futures backtester
+needs. Freqtrade cannot download Hyperliquid history itself.
 
 Usage:
     uv run python scripts/download_data.py
@@ -253,9 +254,16 @@ def main():
         "--freqtrade-dir",
         type=Path,
         default=None,
-        help="Also download funding rates and write Freqtrade backtest files here",
+        help="Also write Freqtrade backtest files here (needs funding)",
+    )
+    parser.add_argument(
+        "--no-funding",
+        action="store_true",
+        help="Skip the funding download (Phase 1 then assumes a constant rate)",
     )
     args = parser.parse_args()
+    if args.freqtrade_dir is not None and args.no_funding:
+        parser.error("--freqtrade-dir needs funding; drop --no-funding")
 
     args.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,9 +288,16 @@ def main():
                 msg = f"ERROR downloading {pair} {tf}: {e}"
                 print(f"    {msg}", file=sys.stderr)
                 errors.append(msg)
-        if args.freqtrade_dir is not None:
+        if not args.no_funding:
             try:
                 download_funding(exchange, pair, args.data_dir, args.since)
+            except Exception as e:
+                msg = f"ERROR downloading funding for {pair}: {e}"
+                print(f"    {msg}", file=sys.stderr)
+                errors.append(msg)
+                continue
+        if args.freqtrade_dir is not None:
+            try:
                 export_freqtrade(pair, args.data_dir, args.freqtrade_dir)
             except Exception as e:
                 msg = f"ERROR preparing Freqtrade data for {pair}: {e}"
