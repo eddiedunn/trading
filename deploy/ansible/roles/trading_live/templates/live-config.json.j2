@@ -30,9 +30,7 @@
   "dry_run": {{ trading_live_dry_run | bool | to_json }},
   "dry_run_wallet": {{ trading_live_dry_run_wallet }},
   "db_url": "sqlite:////freqtrade/user_data/{{ 'tradesv3.dryrun.sqlite' if trading_live_dry_run | bool else 'tradesv3.sqlite' }}",
-  "stoploss": -0.05,
-  "trailing_stop": true,
-  "trailing_stop_positive": 0.02,
+{# No stoploss, trailing_* or minimal_roi here: config values override the strategy's own. #}
   "entry_pricing": {"price_side": "same"},
   "exit_pricing": {"price_side": "same"},
   "api_server": {

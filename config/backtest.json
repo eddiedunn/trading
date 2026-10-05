@@ -25,9 +25,6 @@
   "timeframe": "4h",
   "dry_run": true,
   "dry_run_wallet": 100,
-  "stoploss": -0.05,
-  "trailing_stop": true,
-  "trailing_stop_positive": 0.02,
   "entry_pricing": {
     "price_side": "same"
   },

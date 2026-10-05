@@ -157,9 +157,8 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
         # Keep the dry-run trade history next to the logs so it survives restarts.
         "db_url": "sqlite:////freqtrade/logs/tradesv3.dryrun.sqlite",
         "initial_state": "running",
-        "stoploss": -0.05,
-        "trailing_stop": True,
-        "trailing_stop_positive": 0.02,
+        # No stoploss, trailing_* or minimal_roi: config values override the
+        # strategy's own, and each strategy declares its exits.
         "api_server": {
             "enabled": True,
             "listen_ip_address": "0.0.0.0",
