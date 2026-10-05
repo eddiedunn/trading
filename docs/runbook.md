@@ -129,9 +129,12 @@ Read it from inside the API container (Python's `sqlite3` module; the host
 may not have the `sqlite3` command):
 
 ```bash
-ssh tela podman exec backtest-api python -c "import sqlite3, os; c = sqlite3.connect(os.environ['TRADING_RESULTS_DIR'] + '/ledger.sqlite'); \
-  print(c.execute('select campaign, count(distinct code_sha256) from attempts where phase = 1 group by campaign').fetchall()); \
-  print(c.execute('select ts, strategy_name, passed from final_tests order by ts desc').fetchall())"
+ssh tela podman exec -i backtest-api python - <<'EOF'
+import os, sqlite3
+c = sqlite3.connect(os.environ["TRADING_RESULTS_DIR"] + "/ledger.sqlite")
+print(c.execute("select campaign, count(distinct code_sha256) from attempts where phase = 1 group by campaign").fetchall())
+print(c.execute("select ts, strategy_name, passed from final_tests order by ts desc").fetchall())
+EOF
 ```
 
 ## Run a strategy through the pipeline
