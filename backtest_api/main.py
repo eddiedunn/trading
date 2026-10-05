@@ -45,6 +45,8 @@ def run_backtest(req: BacktestRequest):
 
     if req.phase == 1:
         stats = run_fast_filter(req.strategy_name)
+        if stats.get("invalid_signals"):
+            raise HTTPException(422, stats["error"])
         if "error" in stats:
             raise HTTPException(500, stats["error"])
         return _plain({"phase": 1, "stats": stats, "passed": meets_phase1_criteria(stats)})

@@ -38,3 +38,14 @@ def test_phase1_response_serializes_numpy_values(mock_filter, mock_dir, tmp_path
     assert isinstance(body["passed"], bool)
     assert body["stats"]["trade_count"] == 40
     assert body["stats"]["calmar"] is None
+
+
+@patch("backtest_api.main.STRATEGIES_DIR")
+@patch("backtest_api.main.run_fast_filter")
+def test_phase1_invalid_signals_is_a_client_error(mock_filter, mock_dir, tmp_path):
+    mock_dir.__truediv__.side_effect = lambda name: tmp_path / name
+    mock_filter.return_value = {"error": "BTC: generate_signals returned 3 NaN values", "invalid_signals": True,
+                                "per_pair": {}}
+    r = client.post("/backtest", json={"strategy_name": "S", "strategy_code": "", "phase": 1})
+    assert r.status_code == 422
+    assert "NaN" in r.json()["detail"]
