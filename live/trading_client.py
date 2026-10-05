@@ -88,16 +88,23 @@ def retire(name: str):
     print(f"Retired {name}; live reverted to {NULL_STRATEGY}.")
 
 
-def paper_add(name: str, code_path: Path, phase1: dict | None, phase2: dict | None, force: bool = False):
-    """Queue a backtested strategy for the paper arena.
+def paper_add(name: str, code_path: Path, phase1: dict | None, phase2: dict | None,
+              final_test: dict | None = None, force: bool = False):
+    """Queue a tested strategy for the paper arena.
 
-    phase1 / phase2 are the /backtest API responses. Both must have passed
-    unless force is set (used to exercise the pipeline with a losing example).
+    phase1 / phase2 / final_test are the /backtest API responses for phases 1,
+    2 and 3. All three must have passed unless force is set (used to exercise
+    the pipeline with a losing example).
     """
     p1 = bool(phase1 and phase1.get("passed"))
     p2 = bool(phase2 and phase2.get("passed"))
-    if not (p1 and p2) and not force:
-        raise SystemExit(f"{name} has not passed Phase 1 and Phase 2 (phase1={p1}, phase2={p2}); pass --force to queue anyway")
+    ft = bool(final_test and final_test.get("passed"))
+    if not (p1 and p2 and ft) and not force:
+        raise SystemExit(
+            f"{name} has not passed Phase 1, Phase 2 and the final test "
+            f"(phase1={p1}, phase2={p2}, final_test={ft}); pass --force to queue anyway"
+        )
+    campaign = next((r["campaign"] for r in (final_test, phase2, phase1) if r and r.get("campaign")), None)
 
     dest_dir = paper_strategies_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -109,8 +116,9 @@ def paper_add(name: str, code_path: Path, phase1: dict | None, phase2: dict | No
             cur.execute(
                 """
                 INSERT INTO strategy_registry
-                  (name, phase1_passed, phase1_stats, phase2_passed, phase2_stats, paper_queued_at, notes)
-                VALUES (%s, %s, %s, %s, %s, NOW(), %s)
+                  (name, phase1_passed, phase1_stats, phase2_passed, phase2_stats, paper_queued_at, notes,
+                   campaign, final_test_passed, final_test_stats)
+                VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s)
                 """,
                 (
                     name,
@@ -118,7 +126,10 @@ def paper_add(name: str, code_path: Path, phase1: dict | None, phase2: dict | No
                     Json(phase1) if phase1 else None,
                     p2,
                     Json(phase2) if phase2 else None,
-                    "queued with --force" if force and not (p1 and p2) else None,
+                    "queued with --force" if force and not (p1 and p2 and ft) else None,
+                    campaign,
+                    ft if final_test else None,
+                    Json(final_test) if final_test else None,
                 ),
             )
         conn.commit()
@@ -166,12 +177,13 @@ def main():
 
     sub.add_parser("status")
 
-    pa = sub.add_parser("paper-add", help="queue a backtested strategy for the paper arena")
+    pa = sub.add_parser("paper-add", help="queue a strategy that passed both phases and the final test")
     pa.add_argument("--strategy", required=True)
     pa.add_argument("--file", required=True, help="strategy .py file")
     pa.add_argument("--phase1", help="Phase 1 /backtest response JSON file")
     pa.add_argument("--phase2", help="Phase 2 /backtest response JSON file")
-    pa.add_argument("--force", action="store_true", help="queue even if a phase did not pass")
+    pa.add_argument("--final-test", help="final test (phase 3) /backtest response JSON file")
+    pa.add_argument("--force", action="store_true", help="queue even if a phase or the final test did not pass")
 
     pr = sub.add_parser("retire")
     pr.add_argument("--strategy", required=True)
@@ -184,7 +196,8 @@ def main():
     elif args.cmd == "status":
         status()
     elif args.cmd == "paper-add":
-        paper_add(args.strategy, Path(args.file), _load_json(args.phase1), _load_json(args.phase2), args.force)
+        paper_add(args.strategy, Path(args.file), _load_json(args.phase1), _load_json(args.phase2),
+                  _load_json(args.final_test), args.force)
 
 
 if __name__ == "__main__":

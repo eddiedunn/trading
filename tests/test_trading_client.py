@@ -4,6 +4,7 @@ Tests the three main subcommands: promote, status, retire.
 Each covers file operations, database interactions, and CLI argument parsing.
 """
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock, call
@@ -495,25 +496,34 @@ class TestPaperAdd:
         self.code.write_text("# strategy")
         self.paper = tmp_path / "paper"
 
+    FINAL = {"phase": 3, "campaign": "2026-04-06", "passed": True, "stats": {"sharpe": 1.4}}
+
     @patch("live.trading_client._connect")
-    def test_queues_passing_strategy(self, mock_connect):
+    def test_queues_strategy_that_passed_everything(self, mock_connect):
         cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
 
-        paper_add("EmaCross", self.code, {"passed": True}, {"passed": True})
+        paper_add("EmaCross", self.code, {"passed": True}, {"passed": True}, self.FINAL)
 
         assert (self.paper / "strategies" / "EmaCross.py").read_text() == "# strategy"
         sql, params = cur.execute.call_args[0]
         assert "INSERT INTO strategy_registry" in sql
-        assert "paper_queued_at" in sql
+        assert "paper_queued_at" in sql and "final_test_stats" in sql and "campaign" in sql
         assert params[0] == "EmaCross"
         assert params[1] is True and params[3] is True
         assert params[5] is None
+        assert params[6] == "2026-04-06" and params[7] is True
+        assert params[8].adapted == self.FINAL
         mock_connect.return_value.commit.assert_called_once()
 
+    @pytest.mark.parametrize("p1,p2,final", [
+        (True, False, {"passed": True}),
+        (True, True, {"passed": False}),
+        (True, True, None),  # no final test yet
+    ])
     @patch("live.trading_client._connect")
-    def test_refuses_failing_strategy_without_force(self, mock_connect):
-        with pytest.raises(SystemExit):
-            paper_add("EmaCross", self.code, {"passed": True}, {"passed": False})
+    def test_refuses_without_force_unless_all_three_passed(self, mock_connect, p1, p2, final):
+        with pytest.raises(SystemExit, match="final test"):
+            paper_add("EmaCross", self.code, {"passed": p1}, {"passed": p2}, final)
 
         mock_connect.assert_not_called()
         assert not (self.paper / "strategies" / "EmaCross.py").exists()
@@ -522,8 +532,22 @@ class TestPaperAdd:
     def test_force_queues_and_notes_it(self, mock_connect):
         cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
 
-        paper_add("EmaCross", self.code, {"passed": False}, {"passed": False}, force=True)
+        paper_add("EmaCross", self.code, {"passed": False, "campaign": "c1"}, {"passed": False}, force=True)
 
         params = cur.execute.call_args[0][1]
         assert params[1] is False and params[3] is False
         assert params[5] == "queued with --force"
+        assert params[6] == "c1" and params[7] is None and params[8] is None
+
+    @patch("live.trading_client.paper_add")
+    def test_cli_passes_final_test_file(self, mock_add, tmp_path, monkeypatch):
+        files = {}
+        for key, body in (("p1", {"passed": True}), ("p2", {"passed": True}), ("ft", self.FINAL)):
+            files[key] = tmp_path / f"{key}.json"
+            files[key].write_text(json.dumps(body))
+        monkeypatch.setattr("sys.argv", [
+            "trading_client", "paper-add", "--strategy", "EmaCross", "--file", str(self.code),
+            "--phase1", str(files["p1"]), "--phase2", str(files["p2"]), "--final-test", str(files["ft"]),
+        ])
+        main()
+        mock_add.assert_called_once_with("EmaCross", self.code, {"passed": True}, {"passed": True}, self.FINAL, False)
