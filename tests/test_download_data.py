@@ -102,3 +102,36 @@ def test_with_retry_gives_up_after_max_retries():
     with pytest.raises(ccxt.RateLimitExceeded):
         with_retry(always_limited, sleep=sleeps.append)
     assert len(sleeps) == MAX_RETRIES - 1
+
+
+def _run_main(monkeypatch, tmp_path, *extra):
+    import download_data
+
+    calls = {"funding": [], "export": []}
+    monkeypatch.setattr(download_data.ccxt, "hyperliquid", lambda *_a, **_k: MagicMock())
+    monkeypatch.setattr(download_data, "download_pair", lambda *a, **k: 0)
+    monkeypatch.setattr(download_data, "download_funding",
+                        lambda ex, pair, data_dir, since: calls["funding"].append((pair, data_dir)))
+    monkeypatch.setattr(download_data, "export_freqtrade",
+                        lambda pair, data_dir, ft: calls["export"].append(pair))
+    monkeypatch.setattr(sys, "argv", ["download_data.py", "--pairs", PAIR, "--data-dir", str(tmp_path), *extra])
+    download_data.main()
+    return calls
+
+
+def test_main_downloads_funding_into_data_dir_by_default(monkeypatch, tmp_path):
+    """Phase 1 reads funding from the data dir, so it is fetched even without --freqtrade-dir."""
+    calls = _run_main(monkeypatch, tmp_path)
+    assert calls["funding"] == [(PAIR, tmp_path)]
+    assert calls["export"] == []
+
+
+def test_main_no_funding_skips_it(monkeypatch, tmp_path):
+    calls = _run_main(monkeypatch, tmp_path, "--no-funding")
+    assert calls["funding"] == []
+
+
+def test_main_freqtrade_export_still_runs(monkeypatch, tmp_path):
+    calls = _run_main(monkeypatch, tmp_path, "--freqtrade-dir", str(tmp_path / "ft"))
+    assert calls["funding"] == [(PAIR, tmp_path)]
+    assert calls["export"] == [PAIR]
