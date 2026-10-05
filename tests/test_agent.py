@@ -268,6 +268,27 @@ class TestLLM:
         for banned in ("rolling(..., center=True)", "bfill()", "pct_change"):
             assert banned in text
 
+    def test_system_prompt_describes_the_extra_data(self):
+        text = system_prompt()
+        for col in ("funding_rate", "close_BTC", "close_ETH", "close_SOL",
+                    "funding_BTC", "funding_ETH", "funding_SOL"):
+            assert col in text
+        assert "stamped T+1h .. T+4h" in text  # the alignment
+        assert "NaN where there is no funding data" in text
+        assert 'get_pair_dataframe(metadata["pair"], "1h", candle_type="funding_rate")' in text
+        assert "merge_informative_pair" in text and "def informative_pairs" in text
+        assert "can_short = True" in text
+        assert "-35%" in text and "-20%" in text
+        assert "startup_candle_count` at 120" in text
+
+    def test_default_seeds_are_varied(self):
+        from agent.prompts import DEFAULT_SEEDS
+        assert 8 <= len(DEFAULT_SEEDS) <= 10
+        joined = " ".join(DEFAULT_SEEDS).lower()
+        for idea in ("funding", "carry", "relative-strength", "lead-lag", "volatility regime",
+                     "short", "market-neutral", "liquidation"):
+            assert idea in joined
+
     @staticmethod
     def _cli_reply(text="```python\nx = 1\n```", **extra):
         body = {"is_error": False, "stop_reason": "end_turn", "session_id": "sess-1", "result": text,

@@ -636,3 +636,136 @@ def generate_signals(df):
                    for f in r["floor_failures"])
         assert r["gate"]["floor"]["passed"] is False
         assert meets_phase1_criteria(r) is False
+
+
+# --- Extra columns: funding_rate, close_<COIN>, funding_<COIN> ---
+
+from backtest_api.fast_filter import add_context_columns  # noqa: E402
+
+COINS = ("BTC", "ETH", "SOL")
+
+
+def _write_three(data_dir: Path, n: int = 300, with_funding: bool = True):
+    """Three pairs on the same 4h grid; hourly funding whose value encodes its own stamp."""
+    ts = pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")
+    for k, coin in enumerate(COINS):
+        rng = np.random.RandomState(20 + k)
+        prices = 100 * (k + 1) * np.cumprod(1 + rng.normal(0, 0.02, n))
+        pd.DataFrame({"timestamp": ts, "open": prices, "high": prices * 1.01, "low": prices * 0.99,
+                      "close": prices, "volume": 1.0}).to_feather(data_dir / f"{coin}_USDC-USDC_4h.feather")
+        if with_funding:
+            hours = pd.date_range(ts[0] + pd.Timedelta("1h"), ts[-1] + pd.Timedelta("4h"), freq="1h")
+            # rate = (hours since start) * 1e-6 + coin offset, so every sum is checkable by hand
+            rate = (np.arange(len(hours)) + 1) * 1e-6 + k * 1e-3
+            pd.DataFrame({"timestamp": hours, "rate": rate}).to_feather(
+                data_dir / f"{coin}_USDC-USDC_funding_1h.feather")
+    return ts
+
+
+class TestContextColumns:
+    def _df(self, tmp_path, pair="ETH_USDC-USDC_4h", **kw):
+        _write_three(tmp_path, **kw)
+        df = pd.read_feather(tmp_path / f"{pair}.feather")
+        return add_context_columns(df, pair, tmp_path)
+
+    def test_columns_present(self, tmp_path):
+        df = self._df(tmp_path)
+        for col in ("funding_rate", "close_BTC", "close_ETH", "close_SOL",
+                    "funding_BTC", "funding_ETH", "funding_SOL"):
+            assert col in df.columns
+
+    def test_funding_rate_is_the_four_payments_paid_by_the_bars_close(self, tmp_path):
+        """Bar opening at T gets the payments stamped T+1h..T+4h, never T+5h or later."""
+        df = self._df(tmp_path)
+        start = pd.Timestamp("2024-01-01", tz="UTC")
+        for i in (0, 1, 50, 299):
+            t = pd.to_datetime(df["timestamp"].iloc[i], utc=True)
+            stamps = [t + pd.Timedelta(hours=h) for h in range(1, 5)]
+            # ETH is coin index 1: offset 1e-3 per hour
+            expected = sum(((s - start) / pd.Timedelta("1h")) * 1e-6 + 1e-3 for s in stamps)
+            assert df["funding_rate"].iloc[i] == pytest.approx(expected, rel=1e-9)
+            assert max(stamps) == t + pd.Timedelta("4h")  # the bar's close: nothing later
+
+    def test_other_coins_aligned_on_timestamp(self, tmp_path):
+        df = self._df(tmp_path)
+        btc = pd.read_feather(tmp_path / "BTC_USDC-USDC_4h.feather")
+        assert df["close_BTC"].tolist() == pytest.approx(btc["close"].tolist())
+        assert df["close_ETH"].tolist() == pytest.approx(df["close"].tolist())
+        assert df["funding_ETH"].tolist() == pytest.approx(df["funding_rate"].tolist())
+        assert (df["funding_SOL"] - df["funding_BTC"]).round(9).eq(4 * 2e-3).all()
+
+    def test_misaligned_other_coin_is_matched_by_time_not_row(self, tmp_path):
+        _write_three(tmp_path)
+        btc = pd.read_feather(tmp_path / "BTC_USDC-USDC_4h.feather").iloc[10:].reset_index(drop=True)
+        btc.to_feather(tmp_path / "BTC_USDC-USDC_4h.feather")
+        df = add_context_columns(pd.read_feather(tmp_path / "ETH_USDC-USDC_4h.feather"),
+                                 "ETH_USDC-USDC_4h", tmp_path)
+        assert df["close_BTC"].iloc[:10].isna().all()
+        assert df["close_BTC"].iloc[10] == pytest.approx(btc["close"].iloc[0])
+
+    def test_missing_funding_is_nan(self, tmp_path):
+        df = self._df(tmp_path, with_funding=False)
+        assert df["funding_rate"].isna().all()
+        assert df["funding_BTC"].isna().all()
+
+    def test_missing_other_pair_is_nan(self, tmp_path):
+        _write_three(tmp_path)
+        (tmp_path / "SOL_USDC-USDC_4h.feather").unlink()
+        df = add_context_columns(pd.read_feather(tmp_path / "BTC_USDC-USDC_4h.feather"),
+                                 "BTC_USDC-USDC_4h", tmp_path)
+        assert df["close_SOL"].isna().all()
+
+    def test_prefix_of_columns_equals_columns_of_prefix(self, tmp_path):
+        """No look-ahead in the alignment: row t never depends on bars after t."""
+        _write_three(tmp_path)
+        full = pd.read_feather(tmp_path / "SOL_USDC-USDC_4h.feather")
+        whole = add_context_columns(full, "SOL_USDC-USDC_4h", tmp_path)
+        cut = 120
+        # Rewrite every file truncated at the cut (funding through that bar's close only).
+        last_close = pd.to_datetime(full["timestamp"].iloc[cut - 1], utc=True) + pd.Timedelta("4h")
+        for coin in COINS:
+            p = tmp_path / f"{coin}_USDC-USDC_4h.feather"
+            pd.read_feather(p).iloc[:cut].to_feather(p)
+            f = tmp_path / f"{coin}_USDC-USDC_funding_1h.feather"
+            fr = pd.read_feather(f)
+            fr[pd.to_datetime(fr["timestamp"], utc=True) <= last_close].reset_index(drop=True).to_feather(f)
+        part = add_context_columns(full.iloc[:cut], "SOL_USDC-USDC_4h", tmp_path)
+        cols = ["funding_rate", "close_BTC", "close_ETH", "funding_BTC", "funding_ETH"]
+        pd.testing.assert_frame_equal(whole[cols].iloc[:cut], part[cols])
+
+
+class TestStrategiesSeeContextColumns:
+    PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
+
+    def _run(self, tmp_path, code):
+        _write_three(tmp_path)
+        (tmp_path / "S.py").write_text(code)
+        return run_fast_filter("S", pairs=self.PAIRS, data_dir=tmp_path, strategies_dir=tmp_path)
+
+    def test_causal_use_of_funding_and_other_coins_passes_the_prefix_check(self, tmp_path):
+        r = self._run(tmp_path, '''
+def generate_signals(df):
+    hot = df["funding_rate"].rolling(6).sum() > df["funding_rate"].rolling(30).sum() / 5
+    btc_up = df["close_BTC"].pct_change(6, fill_method=None) > 0
+    return (hot.astype(int) - btc_up.astype(int))
+''')
+        assert "error" not in r
+        assert r["lookahead"] is False
+        assert all(m["funding"] == "real" for m in r["per_pair"].values())
+
+    def test_peeking_at_next_bars_funding_is_rejected(self, tmp_path):
+        r = self._run(tmp_path, '''
+def generate_signals(df):
+    return (df["funding_rate"].shift(-1) > df["funding_rate"]).astype(int)
+''')
+        assert r["lookahead"] is True
+
+    def test_signal_reads_only_one_pair_but_sees_all_three(self, tmp_path):
+        r = self._run(tmp_path, '''
+def generate_signals(df):
+    for c in ("close_BTC", "close_ETH", "close_SOL", "funding_BTC", "funding_ETH", "funding_SOL"):
+        assert c in df.columns
+    return (df["close_ETH"] > df["close_ETH"].shift(1)).astype(int)
+''')
+        assert "error" not in r
+        assert r["lookahead"] is False
