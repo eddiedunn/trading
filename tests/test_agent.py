@@ -69,9 +69,9 @@ class TestValidate:
         assert any("looks ahead" in p for p in problems)
 
     def test_too_many_constants(self):
-        code = "A = 1\nB = 2\nC = 3\nD = 4\nE = 5\n" + GOOD  # 2-5 plus 12, 26 and 100 = 7 (1 is exempt)
+        code = "A = 1\nB = 2\nC = 3\nD = 4\nE = 5\n" + GOOD  # 2-5 plus 12, 26, 100 and -0.05 = 8 (1 is exempt)
         assert any("tunable numbers" in p for p in validate_strategy(code, "Good"))
-        assert validate_strategy(code, "Good", max_params=7) == []
+        assert validate_strategy(code, "Good", max_params=8) == []
 
     def test_bad_name(self):
         assert any("identifier" in p for p in validate_strategy(GOOD, "Bad-Name"))
@@ -93,16 +93,16 @@ def _with_signal_expr(expr):
     return GOOD.replace(_SIGNAL_LINE, f"    extra = {expr}\n{_SIGNAL_LINE}")
 
 
-def _over_cap(code, max_params=3):
+def _over_cap(code, max_params=4):
     return [p for p in validate_strategy(code, "Good", max_params=max_params) if "tunable numbers" in p]
 
 
 class TestParamCap:
-    def test_example_is_at_three(self):
+    def test_example_is_at_four(self):  # 12, 26, minimal_roi 100, stoploss -0.05
         assert _over_cap(GOOD) == []
 
     @pytest.mark.parametrize("line", [
-        "A1 = -0.05",
+        "A1 = -0.07",
         "A2: int = 7",
         "A3 = 3 * 4",
         "A4, A5 = 10, 20",
@@ -124,7 +124,7 @@ class TestParamCap:
 
     def test_eight_item_tuple_is_eight_knobs(self):
         problems = _over_cap(_with_module_line("WINDOWS = (2, 3, 5, 8, 13, 21, 34, 55)"), max_params=6)
-        assert problems and problems[0].startswith("11 distinct tunable numbers")
+        assert problems and problems[0].startswith("12 distinct tunable numbers")
         assert "55 (line" in problems[0]
 
     def test_exempt_values_and_reuse_do_not_count(self):
@@ -136,9 +136,15 @@ class TestParamCap:
 
     def test_boilerplate_class_attrs_are_exempt(self):
         code = GOOD.replace("startup_candle_count = SLOW * 3",
-                            "startup_candle_count = SLOW * 3\n    trailing_stop_positive = 0.02\n"
-                            "    trailing_stop_positive_offset = 0.03")
+                            "startup_candle_count = SLOW * 3\n    INTERFACE_VERSION = 3")
         assert _over_cap(code) == []
+
+    def test_stops_are_knobs(self):
+        """No config overrides the strategy's stops any more, so they count toward the cap."""
+        code = GOOD.replace("startup_candle_count = SLOW * 3",
+                            "startup_candle_count = SLOW * 3\n    trailing_stop_positive = 0.02\n"
+                            "    trailing_stop_positive_offset = 0.03\n    stoploss = -0.07")
+        assert _over_cap(code)
 
     def test_minimal_roi_is_not_exempt(self):
         code = GOOD.replace('minimal_roi = {"0": 100}', 'minimal_roi = {"0": 100, "60": 0.04}')

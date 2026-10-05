@@ -34,9 +34,11 @@ harness runs it and reports back.
 - Columns in the `df` passed to `generate_signals`: timestamp, open, high, low, close, volume.
   Freqtrade's `dataframe` names the time column `date` instead, so keep the logic to the price and
   volume columns and both phases see the same thing.
-- Phase 1 charges a 0.045% taker fee per position change and a 0.01%/bar funding drag while in a position.
-- Phase 2 is Freqtrade with a 5% stoploss and a 2% trailing stop from config; Phase 1 has neither,
-  so the two phases can disagree on the same logic. Keep the logic simple enough that both agree.
+- Phase 1 charges a 0.045% taker fee per unit of position change (a long-to-short flip pays twice)
+  and real Hyperliquid funding on held positions (longs pay positive funding, shorts receive it).
+- Phase 2 is Freqtrade using your class's own `stoploss`, trailing stop and `minimal_roi`; Phase 1
+  has no stops, so any stop you set makes the phases disagree. Keep stops wide (a disaster stop)
+  so both phases trade the same logic, and remember they count toward the numeric-literal cap.
 
 ## File format (one file serves every phase)
 - A module-level `generate_signals(df) -> pd.Series` returning a position per bar: 1 long, 0 flat,

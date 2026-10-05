@@ -15,13 +15,11 @@ BANNED_CALLS = {"exec", "eval", "compile", "open", "__import__", "breakpoint", "
 
 MAX_PARAMS = 6  # distinct tunable numeric literals in the file; the overfitting guard
 EXEMPT_LITERALS = {0, 1, -1}
-# IStrategy class attributes Freqtrade needs or that config overrides (stoploss and the
-# trailing stop come from config/backtest.json); numbers in their values are not knobs.
-# minimal_roi is deliberately not here: the config does not override it, so its values tune exits.
+# IStrategy class attributes Freqtrade needs; numbers in their values are not knobs.
+# stoploss, the trailing stop and minimal_roi are deliberately not here: no config overrides
+# them, so their values tune exits and count toward the cap.
 EXEMPT_CLASS_ATTRS = {
-    "INTERFACE_VERSION", "timeframe", "startup_candle_count", "can_short", "stoploss",
-    "trailing_stop", "trailing_stop_positive", "trailing_stop_positive_offset",
-    "trailing_only_offset_is_reached", "process_only_new_candles",
+    "INTERFACE_VERSION", "timeframe", "startup_candle_count", "can_short", "process_only_new_candles",
 }
 
 
