@@ -15,7 +15,7 @@ DEFAULT_API_URL = os.environ.get("BACKTEST_API_URL", "http://127.0.0.1:8070")
 PHASE1_TIMEOUT = 300.0
 PHASE2_TIMEOUT = 1800.0  # three Freqtrade runs; matches submit_strategy.sh
 
-PHASE1_GATE = "total_return > 20%, max_drawdown > -20%, profit_factor > 1.3, win_rate > 45%, trade_count > 30, sharpe > 0.8"
+PHASE1_GATE = "total_return > 20%, max_drawdown > -20%, profit_factor > 1.3, trade_count > 30, sharpe > 0.8"
 PHASE2_GATE = "every window: profit_factor >= 1.2 and max_drawdown >= -25%"
 
 

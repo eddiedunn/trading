@@ -182,6 +182,18 @@ class TestPhase1Criteria:
         }
         assert meets_phase1_criteria(stats) is False
 
+    def test_low_win_rate_still_passes(self):
+        """Win rate is not gated: a 35% win rate with big winners passes."""
+        stats = {
+            "total_return": 0.30,
+            "max_drawdown": -0.15,
+            "profit_factor": 1.5,
+            "win_rate": 0.35,
+            "trade_count": 50,
+            "sharpe": 1.2,
+        }
+        assert meets_phase1_criteria(stats) is True
+
     def test_failing_trade_count(self):
         stats = {
             "total_return": 0.30,

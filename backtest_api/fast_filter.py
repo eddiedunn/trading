@@ -134,12 +134,15 @@ def _aggregate_metrics(results: dict) -> dict:
 
 
 def meets_phase1_criteria(stats: dict) -> bool:
-    """Phase 1 gate: PF>1.3, DD>-20%, Sharpe>0.8, WR>45%, 30+ trades, return>20%."""
+    """Phase 1 gate: PF>1.3, DD>-20%, Sharpe>0.8, 30+ trades, return>20%.
+
+    Win rate is reported but not gated: trend and breakout strategies win
+    under half their trades and still pay, and profit factor already covers it.
+    """
     return (
         stats.get("total_return", 0) > 0.20
         and stats.get("max_drawdown", -1) > -0.20
         and stats.get("profit_factor", 0) > 1.30
-        and stats.get("win_rate", 0) > 0.45
         and stats.get("trade_count", 0) > 30
         and stats.get("sharpe", 0) > 0.80
     )
