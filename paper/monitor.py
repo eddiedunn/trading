@@ -1,19 +1,23 @@
 """Paper arena monitor — collect metrics from running paper instances.
 
-Polls Freqtrade REST APIs, writes snapshots to Postgres, evaluates
-promotion criteria after the evaluation window.
+Polls Freqtrade REST APIs every hour and writes snapshots to Postgres. A
+strategy's paper run ends at ``TARGET_CLOSED_TRADES`` closed trades or after
+``MAX_RUN_DAYS``, whichever comes first. It then passes if paper matched a
+backtest of the same strategy over the same period (see ``paper.compare``).
 
 Run as a service with ``python -m paper.monitor``: it picks up strategies
-queued with ``trading_client paper-add``, runs them as one cohort for the
-evaluation window, records the outcome, and waits for the next queue.
+queued with ``trading_client paper-add``, runs them as one cohort until every
+run has ended, records each outcome, and waits for the next queue.
 """
 
+import json
 import os
 import time
 
 import httpx
 import psycopg2
 
+from paper.compare import evaluate_paper_run, save_result
 from paper.orchestrator import (
     MAX_SLOTS,
     PaperInstance,
@@ -22,51 +26,48 @@ from paper.orchestrator import (
     teardown_paper_instance,
 )
 
-EVAL_WINDOW_DAYS = 14
-POLL_INTERVAL_SECS = 3600  # check every hour
+TARGET_CLOSED_TRADES = 30
+MAX_RUN_DAYS = 60
+POLL_INTERVAL_SECS = 3600  # snapshot every hour
 
-PROMOTION_CRITERIA = {
-    "min_trades": 20,
-    "min_profit_pct": 5.0,  # % total return over window
-    "max_drawdown_pct": -15.0,
-    "min_profit_factor": 1.25,
-}
+
+def _auth() -> tuple[str, str]:
+    return (os.environ.get("FREQTRADE_API_USER", "freqtrade"), os.environ["FREQTRADE_API_PASSWORD"])
 
 
 def collect_metrics(instance: PaperInstance) -> dict:
     """Collect current metrics from a paper instance's REST API."""
     base = f"http://localhost:{instance.port}"
-    auth = (os.environ.get("FREQTRADE_API_USER", "freqtrade"), os.environ["FREQTRADE_API_PASSWORD"])
 
-    with httpx.Client(auth=auth, timeout=30) as client:
+    with httpx.Client(auth=_auth(), timeout=30) as client:
         profit = client.get(f"{base}/api/v1/profit").json()
         status = client.get(f"{base}/api/v1/status").json()
 
     return {
         "strategy": instance.strategy_name,
+        # Closed plus open trades, valued from the starting wallet
         "profit_pct": profit.get("profit_all_percent") or 0,
         "trade_count": profit.get("trade_count") or 0,
+        "closed_trade_count": profit.get("closed_trade_count") or 0,
         "win_rate": profit.get("winrate") or 0,
         # Freqtrade returns null until there is a losing trade
         "profit_factor": profit.get("profit_factor") or 0,
-        # Freqtrade reports a positive fraction (0.12); criteria use negative percent (-12.0)
+        # Freqtrade reports a positive fraction (0.12); stored as negative percent (-12.0)
         "max_drawdown": -abs(profit.get("max_drawdown") or 0) * 100,
         "open_trades": len(status) if isinstance(status, list) else 0,
     }
 
 
-def meets_promotion_criteria(metrics: dict) -> bool:
-    """Check if a paper instance meets promotion thresholds.
-
-    Win rate is recorded but not gated, the same as in Phase 1.
-    """
-    c = PROMOTION_CRITERIA
-    return (
-        metrics["trade_count"] >= c["min_trades"]
-        and metrics["profit_pct"] >= c["min_profit_pct"]
-        and metrics["max_drawdown"] >= c["max_drawdown_pct"]
-        and metrics["profit_factor"] >= c["min_profit_factor"]
-    )
+def collect_trades(instance: PaperInstance) -> list[dict]:
+    """Closed trades plus open ones at their current value (``profit_ratio``, ``profit_abs``)."""
+    base = f"http://localhost:{instance.port}"
+    with httpx.Client(auth=_auth(), timeout=30) as client:
+        closed = client.get(f"{base}/api/v1/trades", params={"limit": 500}).json()
+        status = client.get(f"{base}/api/v1/status").json()
+    trades = list(closed.get("trades") or [])
+    if isinstance(status, list):
+        trades.extend(status)
+    return trades
 
 
 def _poll(instances: list[PaperInstance], db_url: str | None) -> list[dict]:
@@ -82,45 +83,72 @@ def _poll(instances: list[PaperInstance], db_url: str | None) -> list[dict]:
     return all_metrics
 
 
-def best_candidate(all_metrics: list[dict]) -> dict | None:
-    """The highest profit factor among metrics that meet the criteria, or None."""
-    candidates = [m for m in all_metrics if meets_promotion_criteria(m)]
-    return max(candidates, key=lambda m: m["profit_factor"]) if candidates else None
+def end_reason(metrics: dict | None, started_at: float, now: float) -> str | None:
+    """Why this run is over, or None while it continues."""
+    if metrics and metrics.get("closed_trade_count", 0) >= TARGET_CLOSED_TRADES:
+        return f"{TARGET_CLOSED_TRADES} closed trades"
+    if now - started_at >= MAX_RUN_DAYS * 86400:
+        return f"{MAX_RUN_DAYS} days"
+    return None
+
+
+def finish_run(
+    db_url: str | None, inst: PaperInstance, metrics: dict | None, started_at: float, ended_at: float
+) -> dict:
+    """Stop the instance, compare its final results with a backtest, and record pass/fail."""
+    trades = None
+    if metrics is not None:
+        try:
+            trades = collect_trades(inst)
+        except Exception as e:
+            print(f"  Warning: failed to collect trades from {inst.strategy_name}: {e}")
+    teardown_paper_instance(inst)
+
+    result = evaluate_paper_run(inst.strategy_name, started_at, ended_at, metrics, trades)
+    try:
+        path = save_result(result)
+        print(f"  Comparison saved to {path}")
+    except OSError as e:
+        print(f"  Warning: could not save comparison for {inst.strategy_name}: {e}")
+    print(f"PAPER RESULT {json.dumps(result, default=str)}")
+    if result["passed"]:
+        print(
+            f"PROMOTION CANDIDATE: {inst.strategy_name} — "
+            f"run `python -m live.trading_client promote --strategy {inst.strategy_name}` to activate"
+        )
+    else:
+        print(f"PAPER FAIL: {inst.strategy_name} — {result['reason']}")
+    if db_url:
+        _record_result(db_url, inst.strategy_name, result["passed"])
+    return result
 
 
 def run_paper_arena(
     instances: list[PaperInstance],
-    eval_days: int = EVAL_WINDOW_DAYS,
+    started_at: float,
     db_url: str | None = None,
-) -> list[dict]:
-    """
-    Poll all paper instances every hour for eval_days, then poll once more.
+) -> dict[str, dict]:
+    """Poll every instance hourly until each run has ended, then finish it.
 
-    Returns the metrics from that last poll. Only the last poll decides who
-    passes: a strategy that met the bar mid-window and has since fallen below
-    it is not a candidate. The promotion line is printed from the same metrics.
+    Each run ends on its own (see ``end_reason``), and is judged only on the
+    metrics from its last poll. Returns the comparison result per strategy.
     """
-    deadline = time.time() + eval_days * 86400
-
-    while time.time() < deadline:
-        leader = best_candidate(_poll(instances, db_url))
-        if leader:
-            print(
-                f"  -> Meets criteria at this poll: {leader['strategy']} "
-                f"PF={leader['profit_factor']:.2f} "
-                f"WR={leader['win_rate']:.1%} "
-                f"Return={leader['profit_pct']:.1f}%"
-            )
+    running = list(instances)
+    results: dict[str, dict] = {}
+    while True:
+        metrics = {m["strategy"]: m for m in _poll(running, db_url)}
+        now = time.time()
+        for inst in list(running):
+            m = metrics.get(inst.strategy_name)
+            reason = end_reason(m, started_at, now)
+            if reason is None:
+                continue
+            print(f"Paper run for {inst.strategy_name} ended: {reason}")
+            running.remove(inst)
+            results[inst.strategy_name] = finish_run(db_url, inst, m, started_at, now)
+        if not running:
+            return results
         time.sleep(POLL_INTERVAL_SECS)
-
-    final = _poll(instances, db_url)
-    best = best_candidate(final)
-    if best:
-        print(
-            f"PROMOTION CANDIDATE: {best['strategy']} — "
-            f"run `python -m live.trading_client promote --strategy {best['strategy']}` to activate"
-        )
-    return final
 
 
 def _write_metrics_snapshot(all_metrics: list[dict], db_url: str):
@@ -229,21 +257,15 @@ def wait_until_ready(instance: PaperInstance, timeout: float = STARTUP_TIMEOUT_S
     return False
 
 
-def run_cohort(db_url: str, names: list[str], eval_days: int = EVAL_WINDOW_DAYS) -> None:
-    """Paper-trade one cohort for the evaluation window and record each outcome."""
+def run_cohort(db_url: str, names: list[str]) -> None:
+    """Paper-trade one cohort until every run has ended and record each outcome."""
     instances = [spawn_paper_instance(name, slot) for slot, name in enumerate(names)]
     _mark_started(db_url, names)
     try:
         for inst in instances:
             if not wait_until_ready(inst):
                 print(f"  Warning: {inst.container_name} did not answer /api/v1/ping in time")
-        final = {m["strategy"]: m for m in run_paper_arena(instances, eval_days=eval_days, db_url=db_url)}
-        for inst in instances:
-            metrics = final.get(inst.strategy_name)
-            if metrics is None:
-                print(f"  Warning: no final metrics for {inst.strategy_name}; recording a fail")
-            passed = metrics is not None and meets_promotion_criteria(metrics)
-            _record_result(db_url, inst.strategy_name, passed)
+        run_paper_arena(instances, started_at=time.time(), db_url=db_url)
     finally:
         for inst in instances:
             teardown_paper_instance(inst)

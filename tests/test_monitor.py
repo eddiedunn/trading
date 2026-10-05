@@ -1,7 +1,7 @@
 """Unit tests for paper arena monitor.
 
-Tests promotion criteria evaluation, metric extraction from REST API,
-and Postgres snapshot persistence.
+Tests metric collection from the REST API, Postgres snapshots, the queue, and
+the run loop that ends each run at 30 closed trades or 60 days.
 """
 
 import os
@@ -10,108 +10,28 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 from paper.monitor import (
+    MAX_RUN_DAYS,
+    POLL_INTERVAL_SECS,
+    TARGET_CLOSED_TRADES,
     collect_metrics,
-    meets_promotion_criteria,
+    collect_trades,
+    end_reason,
+    finish_run,
     run_paper_arena,
-    best_candidate,
     _write_metrics_snapshot,
-    PROMOTION_CRITERIA,
 )
 from paper.orchestrator import PaperInstance
 
+DAY = 86400
 
-class TestMeetsPromotionCriteria:
-    """Test the promotion gate function."""
 
-    def test_all_criteria_pass(self):
-        """Metrics meeting all criteria return True."""
-        metrics = {
-            "trade_count": 30,
-            "profit_pct": 10.0,
-            "max_drawdown": -10.0,
-            "win_rate": 0.50,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is True
+def _inst(name="StratA", slot=0):
+    return PaperInstance(name, 8090 + slot, f"paper_{name.lower()}_{slot}", f"paper_{name.lower()}")
 
-    def test_trade_count_boundary(self):
-        """Test trade_count at boundary."""
-        metrics = {
-            "trade_count": PROMOTION_CRITERIA["min_trades"],
-            "profit_pct": 10.0,
-            "max_drawdown": -10.0,
-            "win_rate": 0.50,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is True
 
-        metrics["trade_count"] = PROMOTION_CRITERIA["min_trades"] - 1
-        assert meets_promotion_criteria(metrics) is False
-
-    def test_profit_pct_boundary(self):
-        """Test profit_pct at boundary."""
-        metrics = {
-            "trade_count": 30,
-            "profit_pct": PROMOTION_CRITERIA["min_profit_pct"],
-            "max_drawdown": -10.0,
-            "win_rate": 0.50,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is True
-
-        metrics["profit_pct"] = PROMOTION_CRITERIA["min_profit_pct"] - 0.1
-        assert meets_promotion_criteria(metrics) is False
-
-    def test_max_drawdown_boundary(self):
-        """Test max_drawdown at boundary (remember: more negative is worse)."""
-        metrics = {
-            "trade_count": 30,
-            "profit_pct": 10.0,
-            "max_drawdown": PROMOTION_CRITERIA["max_drawdown_pct"],
-            "win_rate": 0.50,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is True
-
-        # More negative (worse) → fail
-        metrics["max_drawdown"] = PROMOTION_CRITERIA["max_drawdown_pct"] - 5.0
-        assert meets_promotion_criteria(metrics) is False
-
-    def test_low_win_rate_still_passes(self):
-        """Win rate is not gated: a 30% win rate with big winners passes."""
-        metrics = {
-            "trade_count": 30,
-            "profit_pct": 10.0,
-            "max_drawdown": -10.0,
-            "win_rate": 0.30,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is True
-
-    def test_profit_factor_boundary(self):
-        """Test profit_factor at boundary."""
-        metrics = {
-            "trade_count": 30,
-            "profit_pct": 10.0,
-            "max_drawdown": -10.0,
-            "win_rate": 0.50,
-            "profit_factor": PROMOTION_CRITERIA["min_profit_factor"],
-        }
-        assert meets_promotion_criteria(metrics) is True
-
-        metrics["profit_factor"] = PROMOTION_CRITERIA["min_profit_factor"] - 0.01
-        assert meets_promotion_criteria(metrics) is False
-
-    def test_fails_multiple_criteria(self):
-        """Failing multiple criteria still returns False."""
-        metrics = {
-            "trade_count": 5,  # too low
-            "profit_pct": 1.0,  # too low
-            "max_drawdown": -20.0,
-            "win_rate": 0.50,
-            "profit_factor": 1.5,
-        }
-        assert meets_promotion_criteria(metrics) is False
+def _metrics(name="StratA", closed=0, **kw):
+    return {"strategy": name, "profit_pct": 1.0, "trade_count": closed, "closed_trade_count": closed,
+            "win_rate": 0.5, "profit_factor": 1.2, "max_drawdown": -3.0, "open_trades": 0, **kw}
 
 
 class TestCollectMetrics:
@@ -135,6 +55,7 @@ class TestCollectMetrics:
             MagicMock(json=lambda: {
                 "profit_all_percent": 8.5,
                 "trade_count": 25,
+                "closed_trade_count": 23,
                 "winrate": 0.48,
                 "profit_factor": 1.3,
                 "max_drawdown": 0.12,
@@ -150,6 +71,7 @@ class TestCollectMetrics:
         assert metrics["strategy"] == "TestStrat"
         assert metrics["profit_pct"] == 8.5
         assert metrics["trade_count"] == 25
+        assert metrics["closed_trade_count"] == 23
         assert metrics["win_rate"] == 0.48
         assert metrics["profit_factor"] == 1.3
         assert metrics["max_drawdown"] == -12.0
@@ -172,7 +94,6 @@ class TestCollectMetrics:
 
         assert metrics["profit_factor"] == 0
         assert metrics["max_drawdown"] == 0
-        assert meets_promotion_criteria(metrics) is False
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     @patch("paper.monitor.httpx.Client")
@@ -368,94 +289,6 @@ def _m(strategy, **kw):
 FAILING = {"trade_count": 5, "profit_pct": 2.0, "max_drawdown": -20.0, "profit_factor": 1.1}
 
 
-class TestRunPaperArena:
-    """Test the main evaluation loop. One time.time() call sets the deadline,
-    then one per loop check; after the loop comes one final poll."""
-
-    S1 = PaperInstance("Strat1", 8090, "paper_strat1_0", "paper_strat1")
-    S2 = PaperInstance("Strat2", 8091, "paper_strat2_1", "paper_strat2")
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    def test_promotes_best_of_final_poll(self, mock_collect, mock_sleep, mock_time, capsys):
-        mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = [
-            _m("Strat1", profit_factor=1.3), _m("Strat2"),  # in-loop poll
-            _m("Strat1", profit_factor=1.3), _m("Strat2"),  # final poll
-        ]
-
-        final = run_paper_arena([self.S1, self.S2], eval_days=0.00001)
-
-        assert [m["strategy"] for m in final] == ["Strat1", "Strat2"]
-        assert "PROMOTION CANDIDATE: Strat2" in capsys.readouterr().out
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    def test_no_candidates(self, mock_collect, mock_sleep, mock_time, capsys):
-        mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = [_m("Strat1", **FAILING), _m("Strat1", **FAILING)]
-
-        final = run_paper_arena([self.S1], eval_days=0.00001)
-
-        assert best_candidate(final) is None
-        assert "PROMOTION" not in capsys.readouterr().out
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    def test_passes_mid_run_but_fails_at_end_is_not_promoted(self, mock_collect, mock_sleep, mock_time, capsys):
-        """A strategy that met the bar mid-window and fell below it is not promoted."""
-        mock_time.side_effect = [0, 0, 1500, 3000]
-        mock_collect.side_effect = [
-            _m("Strat1"),                 # poll 1: passes
-            _m("Strat1", profit_pct=1.0),  # poll 2: below the bar
-            _m("Strat1", profit_pct=1.0),  # final poll: still below
-        ]
-
-        final = run_paper_arena([self.S1], eval_days=2500 / 86400)
-
-        assert best_candidate(final) is None
-        assert meets_promotion_criteria(final[0]) is False
-        out = capsys.readouterr().out
-        assert "PROMOTION CANDIDATE" not in out
-        assert "promote --strategy" not in out
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    @patch("paper.monitor._write_metrics_snapshot")
-    def test_writes_every_poll_to_db(self, mock_write, mock_collect, mock_sleep, mock_time):
-        mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = [_m("Strat1"), _m("Strat1")]
-
-        run_paper_arena([self.S1], eval_days=0.00001, db_url="postgresql://localhost/trading")
-
-        assert mock_write.call_count == 2
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    def test_handles_collection_error(self, mock_collect, mock_sleep, mock_time):
-        mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = Exception("Connection failed")
-
-        assert run_paper_arena([self.S1], eval_days=0.00001) == []
-
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.collect_metrics")
-    def test_respects_deadline(self, mock_collect, mock_sleep, mock_time):
-        """Deadline 2500s: loop polls at t=0 and t=1500, stops at t=3000, then polls once more."""
-        mock_time.side_effect = [0, 0, 1500, 3000]
-        mock_collect.side_effect = [_m("Strat1", **FAILING)] * 3
-
-        run_paper_arena([self.S1], eval_days=2500 / 86400)
-
-        assert mock_collect.call_count == 3
-
-
 class TestQueue:
     """Test the strategy_registry queue the service loop reads."""
 
@@ -493,63 +326,156 @@ class TestQueue:
         assert db_url_from_env() == "postgresql://u:p@127.0.0.1:5432/d"
 
 
-class TestRunCohort:
-    """Test one paper cohort from spawn to recorded outcome."""
+class TestCollectTrades:
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
+    @patch("paper.monitor.httpx.Client")
+    def test_returns_closed_and_open_trades(self, mock_client_cls):
+        client = mock_client_cls.return_value.__enter__.return_value
+        client.get.side_effect = [
+            MagicMock(json=lambda: {"trades": [{"profit_ratio": -0.02, "profit_abs": -1.0}], "total_trades": 1}),
+            MagicMock(json=lambda: [{"profit_ratio": 0.03, "profit_abs": 1.5}]),
+        ]
 
-    @patch("paper.monitor.teardown_paper_instance")
+        trades = collect_trades(_inst())
+
+        assert [t["profit_ratio"] for t in trades] == [-0.02, 0.03]
+        assert client.get.call_args_list[0] == call("http://localhost:8090/api/v1/trades", params={"limit": 500})
+
+
+class TestEndReason:
+    def test_runs_on_below_both_limits(self):
+        assert end_reason(_metrics(closed=TARGET_CLOSED_TRADES - 1), 0, MAX_RUN_DAYS * DAY - 1) is None
+
+    def test_ends_at_target_closed_trades(self):
+        assert end_reason(_metrics(closed=TARGET_CLOSED_TRADES), 0, DAY) == "30 closed trades"
+
+    def test_open_trades_do_not_count(self):
+        m = _metrics(closed=TARGET_CLOSED_TRADES - 1, trade_count=TARGET_CLOSED_TRADES + 2)
+        assert end_reason(m, 0, DAY) is None
+
+    def test_ends_at_max_days_even_without_metrics(self):
+        assert end_reason(None, 0, MAX_RUN_DAYS * DAY) == "60 days"
+        assert end_reason(None, 0, DAY) is None
+
+    def test_limits_are_eddies_decision(self):
+        assert (TARGET_CLOSED_TRADES, MAX_RUN_DAYS) == (30, 60)
+
+
+class TestRunPaperArena:
+    @patch("paper.monitor.finish_run")
+    @patch("paper.monitor._poll")
+    @patch("paper.monitor.time.sleep")
+    @patch("paper.monitor.time.time")
+    def test_each_run_ends_on_its_own_and_is_judged_on_its_last_poll(
+        self, mock_time, mock_sleep, mock_poll, mock_finish
+    ):
+        a, b = _inst("StratA", 0), _inst("StratB", 1)
+        # poll 1: neither done; poll 2: A hits 30 closed trades; poll 3: B reaches 60 days
+        answers = iter([
+            [_metrics("StratA", 10), _metrics("StratB", 2)],
+            [_metrics("StratA", 30), _metrics("StratB", 3)],
+            [_metrics("StratB", 4)],
+        ])
+        polled = []
+        mock_poll.side_effect = lambda insts, db: polled.append(list(insts)) or next(answers)
+        mock_time.side_effect = [DAY, 2 * DAY, MAX_RUN_DAYS * DAY]
+        mock_finish.side_effect = lambda db, inst, m, s, e: {"passed": inst.strategy_name == "StratA"}
+
+        results = run_paper_arena([a, b], started_at=0, db_url="postgresql://x")
+
+        assert results == {"StratA": {"passed": True}, "StratB": {"passed": False}}
+        finished = [(c.args[1].strategy_name, c.args[2]["closed_trade_count"], c.args[4]) for c in mock_finish.call_args_list]
+        assert finished == [("StratA", 30, 2 * DAY), ("StratB", 4, MAX_RUN_DAYS * DAY)]
+        assert mock_sleep.call_args_list == [call(POLL_INTERVAL_SECS)] * 2
+        assert polled == [[a, b], [a, b], [b]]  # a finished run is no longer polled
+
+    @patch("paper.monitor.finish_run", return_value={"passed": False})
+    @patch("paper.monitor._write_metrics_snapshot")
+    @patch("paper.monitor.collect_metrics", side_effect=RuntimeError("down"))
+    @patch("paper.monitor.time.sleep")
+    @patch("paper.monitor.time.time", side_effect=[DAY, MAX_RUN_DAYS * DAY])
+    def test_unreachable_instance_fails_at_deadline_with_no_metrics(
+        self, mock_time, mock_sleep, mock_collect, mock_write, mock_finish
+    ):
+        run_paper_arena([_inst()], started_at=0, db_url="postgresql://x")
+
+        assert mock_finish.call_args.args[2] is None
+        mock_write.assert_not_called()
+
+    @patch("paper.monitor.finish_run", return_value={"passed": True})
+    @patch("paper.monitor._write_metrics_snapshot")
+    @patch("paper.monitor.collect_metrics")
+    @patch("paper.monitor.time.sleep")
+    @patch("paper.monitor.time.time", side_effect=[DAY, 2 * DAY])
+    def test_writes_every_hourly_poll_to_db(self, mock_time, mock_sleep, mock_collect, mock_write, mock_finish):
+        mock_collect.side_effect = [_metrics(closed=5), _metrics(closed=30)]
+
+        run_paper_arena([_inst()], started_at=0, db_url="postgresql://x")
+
+        assert mock_write.call_count == 2
+
+
+class TestFinishRun:
     @patch("paper.monitor._record_result")
+    @patch("paper.monitor.save_result")
+    @patch("paper.monitor.evaluate_paper_run")
+    @patch("paper.monitor.teardown_paper_instance")
+    @patch("paper.monitor.collect_trades")
+    def test_stops_instance_then_compares_and_records(
+        self, mock_trades, mock_teardown, mock_eval, mock_save, mock_record, capsys
+    ):
+        order = []
+        mock_trades.side_effect = lambda i: order.append("trades") or [{"profit_ratio": 0.01}]
+        mock_teardown.side_effect = lambda i: order.append("teardown")
+        mock_eval.side_effect = lambda *a: order.append("eval") or {
+            "passed": True, "reason": "matches backtest", "strategy": "StratA"}
+        inst, m = _inst(), _metrics(closed=30)
+
+        result = finish_run("postgresql://x", inst, m, 100.0, 200.0)
+
+        assert order == ["trades", "teardown", "eval"]
+        mock_eval.assert_called_once_with("StratA", 100.0, 200.0, m, [{"profit_ratio": 0.01}])
+        mock_save.assert_called_once_with(result)
+        mock_record.assert_called_once_with("postgresql://x", "StratA", True)
+        assert "PROMOTION CANDIDATE: StratA" in capsys.readouterr().out
+
+    @patch("paper.monitor._record_result")
+    @patch("paper.monitor.save_result")
+    @patch("paper.monitor.evaluate_paper_run", return_value={"passed": False, "reason": "no final paper metrics or trades"})
+    @patch("paper.monitor.teardown_paper_instance")
+    @patch("paper.monitor.collect_trades", side_effect=RuntimeError("down"))
+    def test_trade_fetch_failure_is_a_recorded_fail(
+        self, mock_trades, mock_teardown, mock_eval, mock_save, mock_record, capsys
+    ):
+        finish_run("postgresql://x", _inst(), _metrics(closed=30), 0, 1)
+
+        assert mock_eval.call_args.args[4] is None
+        mock_record.assert_called_once_with("postgresql://x", "StratA", False)
+        out = capsys.readouterr().out
+        assert "PAPER FAIL: StratA" in out and "PROMOTION CANDIDATE" not in out
+
+
+class TestRunCohort:
+    @patch("paper.monitor.teardown_paper_instance")
     @patch("paper.monitor._mark_started")
     @patch("paper.monitor.run_paper_arena")
     @patch("paper.monitor.wait_until_ready", return_value=True)
     @patch("paper.monitor.spawn_paper_instance")
-    def test_records_each_outcome_and_tears_down(
-        self, mock_spawn, mock_ready, mock_arena, mock_started, mock_record, mock_teardown
+    @patch("paper.monitor.time.time", return_value=1234.0)
+    def test_runs_arena_from_ready_time_and_tears_down(
+        self, mock_time, mock_spawn, mock_ready, mock_arena, mock_started, mock_teardown
     ):
         from paper.monitor import run_cohort
 
-        a = PaperInstance("Good", 8090, "paper_good_0", "paper_good")
-        b = PaperInstance("Bad", 8091, "paper_bad_1", "paper_bad")
-        c = PaperInstance("Gone", 8092, "paper_gone_2", "paper_gone")
-        mock_spawn.side_effect = [a, b, c]
-        # "Gone" answered no final poll, so it has no metrics.
-        mock_arena.return_value = [_m("Good"), _m("Bad", profit_factor=0.5)]
+        insts = [_inst("StratA", 0), _inst("StratB", 1)]
+        mock_spawn.side_effect = insts
 
-        run_cohort("postgresql://x", ["Good", "Bad", "Gone"], eval_days=14)
+        run_cohort("postgresql://x", ["StratA", "StratB"])
 
-        assert mock_spawn.call_args_list == [call("Good", 0), call("Bad", 1), call("Gone", 2)]
-        mock_started.assert_called_once_with("postgresql://x", ["Good", "Bad", "Gone"])
-        mock_arena.assert_called_once_with([a, b, c], eval_days=14, db_url="postgresql://x")
-        assert mock_record.call_args_list == [
-            call("postgresql://x", "Good", True),
-            call("postgresql://x", "Bad", False),
-            call("postgresql://x", "Gone", False),
-        ]
-        assert mock_teardown.call_count == 3
-
-    @patch("paper.monitor.teardown_paper_instance")
-    @patch("paper.monitor._record_result")
-    @patch("paper.monitor._mark_started")
-    @patch("paper.monitor._write_metrics_snapshot")
-    @patch("paper.monitor.collect_metrics")
-    @patch("paper.monitor.time.sleep")
-    @patch("paper.monitor.time.time")
-    @patch("paper.monitor.wait_until_ready", return_value=True)
-    @patch("paper.monitor.spawn_paper_instance")
-    def test_mid_run_pass_then_end_fail_records_fail_and_prints_no_promotion(
-        self, mock_spawn, mock_ready, mock_time, mock_sleep, mock_collect, mock_write,
-        mock_started, mock_record, mock_teardown, capsys,
-    ):
-        """Printed line and recorded result both come from the final poll."""
-        from paper.monitor import run_cohort
-
-        mock_spawn.return_value = PaperInstance("Fader", 8090, "paper_fader_0", "paper_fader")
-        mock_time.side_effect = [0, 0, 100]
-        mock_collect.side_effect = [_m("Fader"), _m("Fader", **FAILING)]
-
-        run_cohort("postgresql://x", ["Fader"], eval_days=0.00001)
-
-        mock_record.assert_called_once_with("postgresql://x", "Fader", False)
-        assert "PROMOTION CANDIDATE" not in capsys.readouterr().out
+        assert mock_spawn.call_args_list == [call("StratA", 0), call("StratB", 1)]
+        mock_started.assert_called_once_with("postgresql://x", ["StratA", "StratB"])
+        mock_arena.assert_called_once_with(insts, started_at=1234.0, db_url="postgresql://x")
+        assert mock_teardown.call_count == 2
 
     @patch("paper.monitor.teardown_paper_instance")
     @patch("paper.monitor._mark_started")
@@ -559,9 +485,9 @@ class TestRunCohort:
     def test_tears_down_when_arena_fails(self, mock_spawn, mock_ready, mock_arena, mock_started, mock_teardown):
         from paper.monitor import run_cohort
 
-        mock_spawn.return_value = PaperInstance("S", 8090, "paper_s_0", "paper_s")
+        mock_spawn.side_effect = [_inst("StratA", 0)]
 
         with pytest.raises(RuntimeError):
-            run_cohort("postgresql://x", ["S"])
+            run_cohort("postgresql://x", ["StratA"])
 
         mock_teardown.assert_called_once()

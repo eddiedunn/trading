@@ -29,6 +29,11 @@
     - "{{ paper_arena_dir }}/strategies"
     - "{{ paper_arena_dir }}/configs"
     - "{{ paper_arena_dir }}/logs"
+    # End-of-run comparison backtest: downloaded candles/funding, the same data
+    # in Freqtrade's layout, and the backtest output and comparison JSON.
+    - "{{ paper_arena_dir }}/data"
+    - "{{ paper_arena_ftdata_dir }}"
+    - "{{ paper_arena_dir }}/compare"
 
 - name: Enable user linger for {{ ansible_user }}
   become: true
