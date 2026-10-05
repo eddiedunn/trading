@@ -6,7 +6,7 @@ _As of 2026-10-02._
 |---|---|---|
 | 1. Fast filter | tela | **Deployed, working** — `POST /backtest` phase 1 |
 | 2. Walk-forward | tela | **Deployed, working** — 3 rolling windows ending today (12/6/6 months), real Freqtrade runs |
-| 3. Paper arena | trinity | **Deployed, working** — queue via `scripts/submit_strategy.sh`, 14-day cohorts, hourly snapshots |
+| 3. Paper arena | trinity | **Deployed, working** — queue via `scripts/submit_strategy.sh` (Phase 1, Phase 2, final test), runs until 30 trades or 60 days, must match a backtest of the same period |
 | 4. Live bot | trinity | **Deployed in dry-run** with `NullStrategy`; real money needs `-e trading_live_dry_run=false` + typed confirmation |
 | Agent loop | — | **Not built** — nothing writes strategies on its own yet (design.md rollout step 6) |
 
