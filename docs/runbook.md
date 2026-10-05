@@ -107,6 +107,32 @@ ssh trinity podman exec trading-postgres psql -U trading -d trading \
   -c "select ts, strategy, profit_pct, trade_count, win_rate, profit_factor, max_drawdown from paper_snapshots order by ts desc limit 20"
 ```
 
+## Strategy agent
+
+`python -m agent run` asks Claude for a strategy in the two-in-one format,
+checks it locally (parses, has `generate_signals` and the right class, imports
+only pandas/numpy/pandas_ta/freqtrade, at most 6 constants, no negative
+`shift`), posts it to Phase 1, and on failure sends the metrics back for a
+revision. Phase 2 runs only after Phase 1 passes; Claude then sees in-sample
+and validation metrics but only pass/fail for the out-of-sample window.
+
+```bash
+ssh -N -L 8070:127.0.0.1:8070 tela &                 # the API only listens on tela's loopback
+export ANTHROPIC_API_KEY=...                         # the SDK reads it; nothing else does
+uv run python -m agent run --max-strategies 2 --seed "Donchian breakout with a volume filter"
+```
+
+Caps: `--max-iterations 5` Claude revisions per strategy, `--max-phase2 2`
+Phase 2 runs per strategy (minutes each), `--max-strategies 2` per run. Model:
+`--model` (default `claude-opus-5-5`). API: `--api-url` or `BACKTEST_API_URL`.
+
+Every attempt lands in `agent_runs/<run id>/log.jsonl` (gitignored) with each
+file version next to it. A strategy that passes both phases is saved as
+`agent_runs/<run id>/<Name>.py` with its `phase1.json` / `phase2.json`, and the
+agent prints the `scripts/submit_strategy.sh` and `paper-add` commands for you
+to run. Only `--queue-paper` makes it call `paper-add` on trinity itself, never
+with `--force`. The agent has no code path to `promote`.
+
 ## Promote to the live bot (manual)
 
 1. Review `paper_snapshots` and the strategy code.

@@ -29,3 +29,6 @@ backtest_results/
 
 # Paper arena run dir when running the monitor locally
 paper/run/
+
+# Strategy agent run logs (generated, not committed)
+agent_runs/

@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "psycopg2-binary>=2.9",
     "httpx>=0.28",
+    "anthropic>=1.11.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +27,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["backtest_api", "paper", "scripts"]
+packages = ["agent", "backtest_api", "paper", "scripts"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
