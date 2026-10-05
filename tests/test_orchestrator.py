@@ -21,6 +21,7 @@ from paper.orchestrator import (
     BASE_PORT,
     MAX_SLOTS,
     configs_dir,
+    archive_old_trades,
 )
 
 
@@ -369,3 +370,19 @@ class TestListPaperInstances:
 
         assert len(instances) == 2
         assert "" not in instances
+
+
+class TestArchiveOldTrades:
+    def test_moves_previous_trade_db_aside(self, tmp_path):
+        for name in ("tradesv3.dryrun.sqlite", "tradesv3.dryrun.sqlite-wal", "freqtrade.log"):
+            (tmp_path / name).write_text("x")
+
+        dest = archive_old_trades(tmp_path)
+
+        assert not list(tmp_path.glob("tradesv3.dryrun.sqlite*"))
+        assert sorted(f.name for f in dest.iterdir()) == ["tradesv3.dryrun.sqlite", "tradesv3.dryrun.sqlite-wal"]
+        assert (tmp_path / "freqtrade.log").exists()
+
+    def test_nothing_to_archive(self, tmp_path):
+        assert archive_old_trades(tmp_path) is None
+        assert list(tmp_path.iterdir()) == []

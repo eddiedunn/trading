@@ -9,6 +9,7 @@ import os
 import secrets
 import subprocess
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,22 @@ class PaperInstance:
         return asdict(self)
 
 
+def archive_old_trades(logs_dir: Path) -> Path | None:
+    """Move a previous run's trade DB aside so each paper run starts at zero trades.
+
+    Freqtrade keeps its dry-run trades in the logs folder, which is reused when the
+    same strategy is spawned again (e.g. after a monitor restart).
+    """
+    old = sorted(logs_dir.glob("tradesv3.dryrun.sqlite*"))
+    if not old:
+        return None
+    dest = logs_dir / f"previous-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    dest.mkdir(parents=True, exist_ok=True)
+    for f in old:
+        f.rename(dest / f.name)
+    return dest
+
+
 def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
     """Start a paper trading container for a candidate strategy."""
     if slot >= MAX_SLOTS:
@@ -65,6 +82,7 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
 
     logs_dir = paper_dir() / "logs" / strategy_name
     logs_dir.mkdir(parents=True, exist_ok=True)
+    archive_old_trades(logs_dir)
 
     subprocess.run(
         [
