@@ -32,3 +32,9 @@ paper/run/
 
 # Strategy agent run logs (generated, not committed)
 agent_runs/
+
+# Local research loop (research/program.md): per-run outputs, not committed
+research/results.tsv
+research/run.log
+research/last_score.json
+research/scratch/

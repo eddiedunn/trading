@@ -270,6 +270,18 @@ test and queue it for paper:
 scripts/submit_strategy.sh agent_runs/<run id>/<Name>.py
 ```
 
+### Local research loop (`research/program.md`)
+
+A second, separate mode in the style of karpathy's autoresearch: point a Claude
+session at `research/program.md` and it edits `research/Candidate.py`, scores
+it with `uv run python -m research.score` (the Phase 1 fast filter run locally,
+plus the three Phase 2 periods and each coin on its own; the headline score is
+the worst view's Sharpe), logs to the gitignored `research/results.tsv`, and
+advances a `research/<tag>` branch on improvements. It never calls tela, so
+nothing it does counts as a campaign attempt. Funding files must be present in
+`data/` (copy `*_funding_1h.feather` from tela's data dir). A candidate that
+passes every view is left for you to inspect and submit by hand.
+
 ## Promote to the live bot (manual)
 
 1. Review `paper_snapshots` and the strategy code.
