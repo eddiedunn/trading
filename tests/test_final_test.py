@@ -50,7 +50,7 @@ def test_runs_one_backtest_from_holdout_to_latest_candle(mock_backtest):
 def test_strong_strategy_passes(mock_backtest):
     mock_backtest.return_value = _result()
     out = ft.run_final_test("S")
-    assert set(out) == {"passed", "window", "stats", "benchmark", "gate"}
+    assert set(out) == {"passed", "window", "stats", "benchmark", "gate", "final_tests", "required_sharpe"}
     assert set(out["gate"]) == {"total_trades", "profit_factor", "max_drawdown", "profit_total",
                                 "sharpe_vs_buy_and_hold"}
     assert out["passed"] is True, out["gate"]
@@ -117,3 +117,10 @@ def test_annualised_sharpe_is_daily_sqrt_365():
     r = pd.Series([0.01, 0.02, 0.0, 0.01])
     assert ft.annualised_sharpe(r) == pytest.approx(r.mean() / r.std() * np.sqrt(365))
     assert ft.annualised_sharpe(pd.Series([0.0, 0.0])) == 0.0
+
+
+def test_sharpe_bar_rises_with_final_tests():
+    """The first final test only has to beat buy-and-hold; each later one needs more."""
+    from backtest_api.fast_filter import expected_max_sharpe
+    bars = [expected_max_sharpe(n, 0.5) for n in (1, 2, 5, 10)]
+    assert bars[0] == 0 and bars == sorted(bars) and bars[-1] > bars[1]

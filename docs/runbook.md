@@ -147,7 +147,14 @@ slot is released and it can be run again.
 - `final_tests(campaign, code_sha256, strategy_name, passed, result_json, ts)`:
   one row per final test, unique per campaign on the code and on the name.
 
-The attempt count that sets the Sharpe bar is an effective number of trials,
+Phase 1 is a screen: its Sharpe bar is max(0.8, buy-and-hold's Sharpe) with no
+multiple-testing penalty. The penalty sits in the final test, on data nothing
+has seen: its Sharpe bar is buy-and-hold's daily Sharpe over the held-back
+months plus the expected best Sharpe of N zero-edge strategies over that length,
+where N is the number of final tests the campaign has run (including this one).
+The first final test needs only to beat buy-and-hold; each later one needs more.
+
+The Phase 1 attempt count is still logged and reported as an effective number of trials,
 computed from the Phase 1 rows of the campaign: each new strategy name (idea)
 counts 1, and each further distinct piece of code (a revision) counts
 `REVISION_WEIGHT` = 0.25 (`backtest_api/ledger.py`), so 2 ideas x 3 versions
@@ -169,7 +176,7 @@ ssh tela podman exec -i backtest-api python - <<'EOF'
 import os, sqlite3
 c = sqlite3.connect(os.environ["TRADING_RESULTS_DIR"] + "/ledger.sqlite")
 from backtest_api.ledger import attempt_counts
-print(attempt_counts("2026-04-06"))  # {"ideas", "versions", "effective"}; effective drives the Sharpe bar
+print(attempt_counts("2026-04-06"))  # {"ideas", "versions", "effective"}; reported only
 print(c.execute("select ts, strategy_name, passed from final_tests order by ts desc").fetchall())
 EOF
 ```
@@ -219,10 +226,10 @@ checks it locally (parses, has `generate_signals` and the right class, imports
 only pandas/numpy/pandas_ta/freqtrade, at most 6 distinct tunable numbers
 anywhere in the file, no look-ahead patterns), posts it to Phase 1, and on failure sends the results back for a
 revision: each gate check with its value and threshold, the strategy's Sharpe
-against buy-and-hold's plus its beta, the campaign's attempt count and current
-Sharpe bar. Phase 2 runs only after Phase 1 passes, and Claude sees every
+against buy-and-hold's plus its beta, the campaign's attempt count and the
+Phase 1 Sharpe bar. Phase 2 runs only after Phase 1 passes, and Claude sees every
 period's metrics (all development data). The prompt tells Claude that the last
-6 months are held back, that every attempt raises the Sharpe bar, and that it
+6 months are held back, that each final test raises the next one's Sharpe bar, and that it
 must beat buy-and-hold on Sharpe. It also describes the extra Phase 1 columns
 (funding, the other coins), the Freqtrade calls that rebuild them, that shorts
 are allowed, and that the -35% per-pair and -20% account drawdown limits sink

@@ -226,7 +226,7 @@ class TestFeedback:
         text = api.phase1_feedback(_phase1(False))
         assert "sharpe: 1.0000 vs threshold 1.3200 — FAILED" in text
         assert "profit_factor: 1.5000 vs threshold 1.3000 — passed" in text
-        assert "Campaign attempts so far: 7 effective" in text and "Sharpe bar is now 1.3200" in text
+        assert "Campaign attempts so far: 7 effective" in text and "Phase 1 Sharpe bar is 1.3200" in text
         assert "Strategy sharpe=1.0000 vs buy-and-hold 0.7100" in text and "beta=0.4200" in text
         assert "Floor failures: sharpe below required" in text
 

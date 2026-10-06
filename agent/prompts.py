@@ -144,9 +144,9 @@ For funding_BTC/ETH/SOL, run the same funding block with `f"{{coin}}/USDC:USDC"`
 
 ## Gates
 - Phase 1 (fast filter over the development history): {PHASE1_GATE}.
-- The Sharpe bar rises with every attempt in the campaign: each distinct file that reaches Phase 1,
-  from any strategy, counts, and a file that fails Phase 1 still counts. Many small tweaks spend the budget
-  and raise the bar for everything after them; a few well-reasoned attempts get further.
+- Every file that reaches Phase 1 is counted. The held-back final test raises its Sharpe bar for
+  every strategy the campaign sends to it, and strategies tuned to development data rarely survive
+  it, so prefer a few well-reasoned ideas over many small tweaks.
 - A strategy must beat buy-and-hold on Sharpe. Holding every pair equally is the benchmark, and
   each result shows its Sharpe next to yours plus your beta to it. With a beta near 1 the result is
   mostly market exposure; the edge is whatever buy-and-hold does not already give.

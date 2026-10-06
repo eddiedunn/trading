@@ -110,16 +110,16 @@ class TestPhase1:
         assert (body["attempts"], body["ideas"], body["versions"]) == (1.25, 1, 2)
         body = _post(1, name="New", code=CODE.replace("0", "3")).json()  # a new idea
         assert (body["attempts"], body["ideas"], body["versions"]) == (2.25, 2, 3)
-        assert phase1.criteria.call_args.kwargs == {"attempts": 2.25}
-        phase1.required.assert_called_with(2.25, 2.3, 0.7)
+        assert phase1.criteria.call_args.kwargs == {"attempts": 1}  # Phase 1 is a screen
+        phase1.required.assert_called_with(1, 2.3, 0.7)
 
     def test_two_ideas_three_versions_pass_three(self, phase1):
         for name in ("A", "B"):
             for v in range(3):
                 body = _post(1, name=name, code=CODE + f"# {name} v{v}\n").json()
         assert (body["attempts"], body["ideas"], body["versions"]) == (3.0, 2, 6)
-        assert phase1.criteria.call_args.kwargs == {"attempts": 3.0}
-        phase1.required.assert_called_with(3.0, 2.3, 0.7)
+        assert phase1.criteria.call_args.kwargs == {"attempts": 1}
+        phase1.required.assert_called_with(1, 2.3, 0.7)
 
     def test_effective_count_where_the_formula_dips_uses_one(self, phase1):
         """At N = 1.25 expected_max_sharpe is negative, so the bar uses N = 1 instead."""
@@ -177,7 +177,7 @@ class TestFinalTest:
         assert body["window"] == "20260406-20261005"
         assert body["stats"]["sharpe"] == 1.4 and body["stats"]["profit_factor"] is None
         assert body["benchmark"]["sharpe"] == 0.6 and body["gate"]["sharpe"]["passed"] is True
-        final_test.assert_called_once_with("S")
+        final_test.assert_called_once_with("S", final_tests=1)
         assert (tmp_path / "strategies" / "S.py").read_text() == CODE
 
     def test_second_final_test_on_same_code_or_name_is_refused(self, final_test):

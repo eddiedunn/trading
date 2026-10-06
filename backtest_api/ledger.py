@@ -1,8 +1,9 @@
 """Attempt ledger: what the backtest API has run, per campaign.
 
 A campaign is one holdout date (periods.campaign_id()). The ledger counts the
-effective number of trials that reached Phase 1 in the campaign (the Phase 1
-Sharpe bar rises with that count; see attempt_counts()), remembers which code passed Phase 2, and allows each
+effective number of trials that reached Phase 1 in the campaign (reported, see
+attempt_counts()), counts final tests (the final test's Sharpe bar rises with
+that count), remembers which code passed Phase 2, and allows each
 piece of code, and each strategy name, exactly one final test on the held-back data.
 
 One SQLite file, TRADING_RESULTS_DIR/ledger.sqlite, created on first use.
@@ -190,6 +191,15 @@ def release_final_test(campaign: str, sha: str) -> None:
     conn = _connect()
     try:
         conn.execute("DELETE FROM final_tests WHERE campaign = ? AND code_sha256 = ? AND passed IS NULL", (campaign, sha))
+    finally:
+        conn.close()
+
+
+def final_test_count(campaign: str) -> int:
+    """Final tests run or running this campaign, including one just claimed."""
+    conn = _connect()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM final_tests WHERE campaign = ?", (campaign,)).fetchone()[0]
     finally:
         conn.close()
 

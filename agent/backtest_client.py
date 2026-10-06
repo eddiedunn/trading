@@ -18,9 +18,8 @@ PHASE2_TIMEOUT = 1800.0  # three Freqtrade runs; matches submit_strategy.sh
 AGENT_PHASES = (1, 2)  # never 3: the final test belongs to a human
 
 PHASE1_GATE = (
-    "floors on total_return, max_drawdown, profit_factor and trade_count; a Sharpe above a bar that rises "
-    "with every attempt in the campaign; and a Sharpe above buy-and-hold's over the same bars. Each result "
-    "lists every check with its value and threshold"
+    "floors on cagr, max_drawdown, profit_factor and trade_count; per-pair floors; and a Sharpe above "
+    "max(0.8, buy-and-hold's over the same bars). Each result lists every check with its value and threshold"
 )
 PHASE2_GATE = "every period: profit_factor >= 1.2 and max_drawdown >= -25%"
 
@@ -73,7 +72,7 @@ def phase1_feedback(result: dict) -> str:
         lines.append(
             f"Campaign attempts so far: {result['attempts']} effective ({result.get('ideas')} ideas, "
             f"{result.get('versions')} versions; a revision counts as a quarter of a new idea); "
-            f"the Sharpe bar is now {_fmt(result.get('required_sharpe'))} and rises with every new attempt."
+            f"the Phase 1 Sharpe bar is {_fmt(result.get('required_sharpe'))}."
         )
     gate = stats.get("gate") or {}
     if gate:

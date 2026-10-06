@@ -48,21 +48,6 @@ def _write_strategy(req: BacktestRequest) -> None:
     strat_path.write_text(req.strategy_code)
 
 
-def _bar_attempts(effective: float) -> float:
-    """The N to give the Sharpe bar for an effective (fractional) trial count.
-
-    fast_filter.expected_max_sharpe's formula goes negative for N just above 1
-    (about -0.03 at N = 1.25, -0.52 at N = 1.01; it crosses 0 near N = 1.29), which
-    would put the bar *below* max(0.8, buy-and-hold). Where it is not positive, use
-    N = 1 (noise bar 0) instead; above that crossing it is increasing, so the bar
-    never drops as trials are added.
-    """
-    from backtest_api.fast_filter import expected_max_sharpe
-
-    n = max(1.0, float(effective))
-    return n if expected_max_sharpe(n, 1.0) > 0 else 1.0
-
-
 def _required_sharpe(attempts: float, stats: dict):
     from backtest_api.fast_filter import required_sharpe
 
@@ -89,15 +74,16 @@ def run_backtest(req: BacktestRequest):
             raise HTTPException(422, stats["error"])
         if "error" in stats:
             raise HTTPException(500, stats["error"])
-        # Counted after this run was recorded, so it counts toward its own bar.
+        # Phase 1 is a screen: its Sharpe bar is max(0.8, buy-and-hold) with no
+        # multiple-testing penalty. That penalty is applied on the held-back data in
+        # the final test, scaled by how many final tests the campaign has run.
         counts = ledger.attempt_counts(campaign)
-        n = _bar_attempts(counts["effective"])
-        passed = bool(meets_phase1_criteria(stats, attempts=n))
+        passed = bool(meets_phase1_criteria(stats, attempts=1))
         ledger.finish_attempt(attempt_id, passed)
         return _plain({
             "phase": 1, "campaign": campaign, "attempts": round(counts["effective"], 2),
             "ideas": counts["ideas"], "versions": counts["versions"],
-            "required_sharpe": _required_sharpe(n, stats), "stats": stats, "passed": passed,
+            "required_sharpe": _required_sharpe(1, stats), "stats": stats, "passed": passed,
         })
 
     if req.phase == 2:
@@ -122,8 +108,9 @@ def run_backtest(req: BacktestRequest):
     from backtest_api.final_test import run_final_test
 
     _write_strategy(req)
+    final_tests = ledger.final_test_count(campaign)  # includes this one, claimed above
     try:
-        result = run_final_test(req.strategy_name)
+        result = run_final_test(req.strategy_name, final_tests=final_tests)
     except Exception:
         ledger.release_final_test(campaign, sha)
         raise

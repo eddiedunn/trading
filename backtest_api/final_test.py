@@ -73,9 +73,15 @@ def benchmark_stats(last_candle) -> dict:
     return stats
 
 
-def run_final_test(strategy_name: str) -> dict:
+def run_final_test(strategy_name: str, final_tests: int = 1) -> dict:
     """One backtest on the holdout; returns
-    {"passed", "window", "stats", "benchmark", "gate": {check: {value, threshold, passed}}}."""
+    {"passed", "window", "stats", "benchmark", "gate": {check: {value, threshold, passed}}, "required_sharpe"}.
+
+    The Sharpe bar is buy-and-hold's daily Sharpe over the holdout plus the
+    expected best Sharpe of ``final_tests`` zero-edge strategies over the holdout's
+    length (fast_filter.expected_max_sharpe). Phase 1 is only a screen, so this is
+    where the campaign pays for trying many strategies.
+    """
     start = wf._holdout_start_dt()
     _, last_candle = wf.common_candle_range()
     end = last_candle + wf.CANDLE
@@ -91,14 +97,16 @@ def run_final_test(strategy_name: str) -> dict:
     window.update(timerange=result["timerange"], backtest_start=result.get("backtest_start"),
                   backtest_end=result.get("backtest_end"))
     benchmark = benchmark_stats(last_candle)
+    from backtest_api.fast_filter import expected_max_sharpe
+
+    holdout_years = max((last_candle - start).total_seconds(), 0) / (365 * 86400)
+    required = round(benchmark["sharpe_daily"] + expected_max_sharpe(final_tests, holdout_years), 4)
 
     if gate:
         block = wf.strategy_block(stats)
         daily = strategy_daily_returns(block, start, last_candle)
         strat_sharpe = round(annualised_sharpe(daily), 4)
-        gate["sharpe_vs_buy_and_hold"] = wf._check(
-            strat_sharpe, benchmark["sharpe_daily"], strat_sharpe > benchmark["sharpe_daily"]
-        )
+        gate["sharpe_vs_buy_and_hold"] = wf._check(strat_sharpe, required, strat_sharpe > required)
         summary = {
             "trades": gate["total_trades"]["value"],
             "profit_total": gate["profit_total"]["value"],
@@ -116,6 +124,8 @@ def run_final_test(strategy_name: str) -> dict:
         "stats": summary,
         "benchmark": benchmark,
         "gate": gate,
+        "final_tests": final_tests,
+        "required_sharpe": required,
     }
     if error:
         out["error"] = error
