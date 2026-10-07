@@ -58,9 +58,17 @@ class BtcLeadFlush(IStrategy):
     startup_candle_count = NORMAL + HOLD
 
     def informative_pairs(self):
-        return [("BTC/USDC:USDC", self.timeframe)]
+        coins = [("BTC/USDC:USDC", self.timeframe)]
+        funding = [(f"{c}/USDC:USDC", "1h", "funding_rate") for c in ("BTC", "ETH", "SOL")]
+        return coins + funding
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # this pair's funding_rate: hourly rates paid in (T, T+4h] summed onto the bar opening at T
+        fr = self.dp.get_pair_dataframe(metadata["pair"], "1h", candle_type="funding_rate")
+        dataframe["funding_rate"] = np.nan
+        if not fr.empty:
+            per_bar = fr.set_index("date")["open"].resample(self.timeframe, closed="right", label="left").sum()
+            dataframe["funding_rate"] = per_bar.reindex(pd.DatetimeIndex(dataframe["date"])).to_numpy()
         # close_BTC: BTC's close for the bar with the same open time (bar T matched to bar T)
         inf = self.dp.get_pair_dataframe("BTC/USDC:USDC", self.timeframe)[["date", "close"]]
         dataframe = merge_informative_pair(dataframe, inf, self.timeframe, self.timeframe,
