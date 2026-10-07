@@ -38,3 +38,4 @@ research/results.tsv
 research/run.log
 research/last_score.json
 research/scratch/
+strategies/candidates/*.phase*.json
