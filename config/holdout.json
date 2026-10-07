@@ -1,4 +1,4 @@
 {
-  "holdout_start": "2026-04-06",
+  "holdout_start": "2026-10-06",
   "note": "Bars at or after holdout_start are never shown to Phase 1, Phase 2 or the strategy agent. Each strategy gets one final pass/fail test on them. Moving this date starts a new campaign: the attempt count resets and every earlier holdout result is void."
 }
