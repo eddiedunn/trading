@@ -40,3 +40,4 @@ research/last_score.json
 research/scratch/
 strategies/candidates/*.phase*.json
 data/hl_archive/
+data/hl_liquidations/
