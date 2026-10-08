@@ -11,4 +11,6 @@ CORE_PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
 COIN_PAIRS = CORE_PAIRS + [f"{c}_USDC-USDC_4h" for c in ("XRP", "AVAX", "NEAR", "DOGE", "LINK", "UNI", "AAVE", "SUI")]
 # Hyperliquid HIP-3 markets deployed by trade.xyz (``xyz:NVDA`` on the API -> ``xyzNVDA`` on disk).
 HIP3_PAIRS = [f"xyz{m}_USDC-USDC_4h" for m in ("SP500", "XYZ100", "GOLD", "SILVER", "CL", "NVDA", "MU", "GOOGL", "META", "TSLA", "AMZN", "MSTR")]
-PAIRS = COIN_PAIRS + HIP3_PAIRS
+# Scored universe (Eddie, 2026-10-08): the coins. The trade.xyz perps stay on disk as data; scoring the
+# candidate by its worst commodity (crude: -1.78, 24 trades) judged a crypto-flow rule on a market it never claimed.
+PAIRS = COIN_PAIRS
