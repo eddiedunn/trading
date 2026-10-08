@@ -25,7 +25,10 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import duckdb
 import pandas as pd
+
+_EXPIRES = None
 
 BUCKET = "s3://hydromancer-reservoir"
 REGION = "ap-northeast-1"
@@ -43,15 +46,29 @@ def aws_env_credentials() -> dict:
     return json.loads(r.stdout)
 
 
-def connect():
-    import duckdb
+def connect() -> duckdb.DuckDBPyConnection:
     c = duckdb.connect()
-    c.execute("INSTALL httpfs; LOAD httpfs;")
-    cred = aws_env_credentials()
-    c.execute(f"""CREATE SECRET s3 (TYPE S3, KEY_ID '{cred['AccessKeyId']}', SECRET '{cred['SecretAccessKey']}',
-                  SESSION_TOKEN '{cred.get('SessionToken', '')}', REGION '{REGION}', REQUESTER_PAYS true)""")
-    c.execute("SET s3_requester_pays = true")
+    c.execute("INSTALL httpfs; LOAD httpfs; SET s3_requester_pays=true")
+    refresh(c)
     return c
+
+
+def refresh(c: duckdb.DuckDBPyConnection) -> None:
+    """(Re)create the S3 secret from the CLI's current credentials. `aws login` hands out
+    15-minute tokens that the CLI refreshes itself, so this is called again before each
+    day's read once the token is within two minutes of expiry."""
+    global _EXPIRES
+    cred = json.loads(subprocess.check_output(["aws", "configure", "export-credentials", "--format", "process"]))
+    exp = cred.get("Expiration")
+    _EXPIRES = pd.Timestamp(exp) if exp else None
+    c.execute("DROP SECRET IF EXISTS reservoir")
+    c.execute(f"""CREATE SECRET reservoir (TYPE S3, KEY_ID '{cred['AccessKeyId']}', SECRET '{cred['SecretAccessKey']}',
+                  SESSION_TOKEN '{cred.get('SessionToken', '')}', REGION '{REGION}')""")
+
+
+def ensure_fresh(c: duckdb.DuckDBPyConnection) -> None:
+    if _EXPIRES is not None and pd.Timestamp.now(tz="UTC") > _EXPIRES - pd.Timedelta(minutes=2):
+        refresh(c)
 
 
 def list_layout(prefix: str) -> None:
@@ -64,6 +81,7 @@ def fetch_day(c, prefix: str, day: date, coins: list[str], cache: Path) -> pd.Da
     out = cache / f"{day.isoformat()}.parquet"
     if out.exists():
         return pd.read_parquet(out)
+    ensure_fresh(c)
     url = f"{BUCKET}/{prefix}/date={day.isoformat()}/fills.parquet"
     coin_list = ", ".join(f"'{x}'" for x in coins)
     try:
