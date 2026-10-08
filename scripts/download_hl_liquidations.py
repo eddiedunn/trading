@@ -29,8 +29,8 @@ import pandas as pd
 
 BUCKET = "s3://hydromancer-reservoir"
 REGION = "ap-northeast-1"
-DEFAULT_PREFIX = "by_dex/hyperliquid/fills/perp/all"  # confirmed or corrected by --list
-DEFAULT_SINCE = "2025-08-01"
+DEFAULT_PREFIX = "by_dex/hyperliquid/fills/perp/liquidations"  # liquidation fills only; the all/ files are ~1 GB a day
+DEFAULT_SINCE = "2025-07-28"  # first day in the bucket
 DEFAULT_COINS = ["BTC", "ETH", "SOL"]
 COLS = ["timestamp", "base_symbol", "side", "price", "size", "direction", "liquidation_method",
         "liquidation_mark_px", "realized_pnl", "start_position", "address", "crossed"]
