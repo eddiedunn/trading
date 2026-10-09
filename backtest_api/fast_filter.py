@@ -13,7 +13,7 @@ from statistics import NormalDist
 import numpy as np
 import pandas as pd
 
-from backtest_api import periods
+from backtest_api import periods, universe
 from backtest_api.benchmark import BARS_PER_YEAR, alpha_beta, buy_and_hold, portfolio_returns, sharpe
 
 TAKER_FEE = 0.00045  # Hyperliquid taker rate (conservative — maker is 0.00015)
@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("TRADING_DATA_DIR", str(_REPO_ROOT / "data")))
 STRATEGIES_DIR = Path(os.environ.get("TRADING_STRATEGIES_DIR", str(_REPO_ROOT / "strategies" / "candidates")))
 
-DEFAULT_PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
+DEFAULT_PAIRS = universe.PAIRS
 
 # Coins whose close and funding every pair's df carries as close_<COIN> / funding_<COIN>,
 # whatever pairs the run itself covers, so a strategy always sees the same columns.

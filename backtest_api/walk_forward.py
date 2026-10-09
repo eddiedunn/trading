@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest_api import universe
 from backtest_api.periods import holdout_start
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +39,7 @@ N_PERIODS = 3
 # forward and the range check below fails the period.
 WARMUP = timedelta(days=20)
 
-PAIRS = ["BTC_USDC-USDC_4h", "ETH_USDC-USDC_4h", "SOL_USDC-USDC_4h"]
+PAIRS = universe.PAIRS
 
 
 def _path(env: str, default: Path) -> Path:
@@ -67,9 +68,13 @@ def data_dir() -> Path:
 
 
 def common_candle_range(pairs: list[str] | None = None) -> tuple[datetime, datetime]:
-    """(first, last) 4h candle open time that every pair has, in UTC."""
+    """(first, last) 4h candle open time that every core pair has, in UTC.
+
+    Anchored on ``universe.CORE_PAIRS`` so the scoring periods keep the full BTC/ETH/SOL
+    history; pairs listed later contribute the bars they have inside each period.
+    """
     firsts, lasts = [], []
-    for pair in pairs or PAIRS:
+    for pair in pairs or universe.CORE_PAIRS:
         path = data_dir() / f"{pair}.feather"
         ts = pd.to_datetime(pd.read_feather(path, columns=["timestamp"])["timestamp"], utc=True)
         firsts.append(ts.min())
