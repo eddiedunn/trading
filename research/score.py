@@ -40,6 +40,8 @@ PERIOD_GATE = {
 def _slice_data(src: Path, dst: Path, start: pd.Timestamp, end: pd.Timestamp) -> None:
     """Copy the pairs' bars in [start, end) and their funding files into dst."""
     for pair in DEFAULT_PAIRS:
+        if not (src / f"{pair}.feather").exists():
+            continue
         df = pd.read_feather(src / f"{pair}.feather")
         ts = pd.to_datetime(df["timestamp"], utc=True)
         df[(ts >= start) & (ts < end)].reset_index(drop=True).to_feather(dst / f"{pair}.feather")

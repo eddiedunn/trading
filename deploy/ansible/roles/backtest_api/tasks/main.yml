@@ -48,8 +48,9 @@
     dest: "{{ backtest_api_data_dir }}/"
     mode: '0644'
     force: false
-  with_fileglob:
-    - "{{ trading_repo_local }}/data/*.feather"
+  with_fileglob:  # the scored pairs' candles and funding only (not the xyz*, ctx or liquidation files)
+    - "{{ trading_repo_local }}/data/[A-Z]*_USDC-USDC_4h.feather"
+    - "{{ trading_repo_local }}/data/[A-Z]*_USDC-USDC_funding_1h.feather"
 
 - name: Build Backtest API container image
   containers.podman.podman_image:
