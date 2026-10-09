@@ -48,9 +48,11 @@ def test_strategies_declare_their_own_stoploss():
         assert "    minimal_roi = " in text, path
 
 
-def test_backtest_config_splits_balance_across_three_slots():
-    """"unlimited" stakes balance / (max_open_trades - open trades), so all three can open."""
+def test_backtest_config_splits_balance_across_every_pair():
+    """"unlimited" stakes balance / (max_open_trades - open trades), so every scored pair can open."""
+    from backtest_api.universe import COIN_PAIRS
     cfg = json.loads((ROOT / "config" / "backtest.json").read_text())
     assert cfg["stake_amount"] == "unlimited"
-    assert cfg["max_open_trades"] == 3
+    assert cfg["max_open_trades"] == len(COIN_PAIRS)
+    assert cfg["exchange"]["pair_whitelist"] == [f"{p.split('_')[0]}/USDC:USDC" for p in COIN_PAIRS]
     assert cfg["dry_run_wallet"] >= 1000

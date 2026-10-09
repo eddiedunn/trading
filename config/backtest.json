@@ -9,7 +9,15 @@
     "pair_whitelist": [
       "BTC/USDC:USDC",
       "ETH/USDC:USDC",
-      "SOL/USDC:USDC"
+      "SOL/USDC:USDC",
+      "XRP/USDC:USDC",
+      "AVAX/USDC:USDC",
+      "NEAR/USDC:USDC",
+      "DOGE/USDC:USDC",
+      "LINK/USDC:USDC",
+      "UNI/USDC:USDC",
+      "AAVE/USDC:USDC",
+      "SUI/USDC:USDC"
     ]
   },
   "pairlists": [
@@ -21,7 +29,7 @@
   "margin_mode": "isolated",
   "stake_currency": "USDC",
   "stake_amount": "unlimited",
-  "max_open_trades": 3,
+  "max_open_trades": 11,
   "timeframe": "4h",
   "dry_run": true,
   "dry_run_wallet": 1000,

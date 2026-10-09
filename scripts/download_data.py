@@ -29,11 +29,11 @@ import pandas as pd
 # Hyperliquid API returns max 5000 candles per request
 API_CANDLE_LIMIT = 5000
 
-DEFAULT_PAIRS = [
-    "BTC/USDC:USDC",
-    "ETH/USDC:USDC",
-    "SOL/USDC:USDC",
-]
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from backtest_api.universe import COIN_PAIRS  # noqa: E402  the scored universe, one source of truth
+
+# "BTC_USDC-USDC_4h" -> "BTC/USDC:USDC"
+DEFAULT_PAIRS = [f"{p.split('_')[0]}/USDC:USDC" for p in COIN_PAIRS]
 
 DEFAULT_TIMEFRAMES = ["1h", "4h", "1d"]
 
