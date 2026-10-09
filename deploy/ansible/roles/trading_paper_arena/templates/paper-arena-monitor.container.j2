@@ -22,6 +22,15 @@ Environment=POSTGRES_PASSWORD={{ trading_postgres_password }}
 Environment=FREQTRADE_API_USER={{ freqtrade_api_user }}
 Environment=FREQTRADE_API_PASSWORD={{ freqtrade_api_password }}
 Environment=TRADING_ENV={{ trading_env }}
+{% if telegram_chat_id %}
+Environment=TELEGRAM_CHAT_ID={{ telegram_chat_id }}
+{% for slot in range(telegram_paper_slots) %}
+{% set token = lookup('pipe', 'gopass show -o ' + _trading_gopass_prefix + '/telegram/paper-bot-token-' + (slot | string) + ' 2>/dev/null || true') %}
+{% if token %}
+Environment=TELEGRAM_BOT_TOKEN_{{ slot }}={{ token }}
+{% endif %}
+{% endfor %}
+{% endif %}
 Environment=PYTHONUNBUFFERED=1
 
 [Service]

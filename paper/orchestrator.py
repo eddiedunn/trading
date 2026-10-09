@@ -75,7 +75,7 @@ def spawn_paper_instance(strategy_name: str, slot: int) -> PaperInstance:
     db_schema = f"paper_{strategy_name.lower()}"
 
     # Write per-candidate config
-    config = _build_paper_config(strategy_name, port, db_schema)
+    config = _build_paper_config(strategy_name, port, db_schema, slot)
     configs_dir().mkdir(parents=True, exist_ok=True)
     config_path = configs_dir() / f"{container_name}.json"
     config_path.write_text(json.dumps(config, indent=2))
@@ -182,7 +182,7 @@ def _base_config() -> dict:
     }
 
 
-def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
+def _build_paper_config(strategy_name: str, port: int, db_schema: str, slot: int = 0) -> dict:
     """Build Freqtrade config for a paper instance."""
     config = _base_config()
     if os.environ.get("TRADING_ENV") == "testnet":
@@ -202,7 +202,44 @@ def _build_paper_config(strategy_name: str, port: int, db_schema: str) -> dict:
             "jwt_secret_key": secrets.token_hex(32),
         },
     })
+    telegram = _telegram_config(slot)
+    if telegram:
+        config["telegram"] = telegram
     return config
+
+
+def _telegram_config(slot: int) -> dict | None:
+    """Freqtrade's built-in Telegram bot for one paper slot, or None when not configured.
+
+    Telegram lets one process poll a bot token at a time, so each slot needs its own
+    bot: ``TELEGRAM_BOT_TOKEN_<slot>`` (slot 0 also accepts ``TELEGRAM_BOT_TOKEN``).
+    ``TELEGRAM_CHAT_ID`` is shared. The monitor's Quadlet passes both from gopass.
+    """
+    token = os.environ.get(f"TELEGRAM_BOT_TOKEN_{slot}") or (
+        os.environ.get("TELEGRAM_BOT_TOKEN") if slot == 0 else None
+    )
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return None
+    return {
+        "enabled": True,
+        "token": token,
+        "chat_id": str(chat_id),
+        # Entries, exits and the daily summary matter in paper; skip the per-loop chatter.
+        "notification_settings": {
+            "status": "silent",
+            "warning": "on",
+            "startup": "on",
+            "entry": "on",
+            "entry_fill": "on",
+            "exit": "on",
+            "exit_fill": "on",
+            "entry_cancel": "silent",
+            "exit_cancel": "silent",
+            "protection_trigger": "silent",
+            "protection_trigger_global": "silent",
+        },
+    }
 
 
 def build_comparison_config() -> dict:

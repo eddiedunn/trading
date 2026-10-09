@@ -44,6 +44,26 @@
     "username": {{ freqtrade_api_user | to_json }},
     "password": {{ freqtrade_api_password | to_json }}
   },
+{% if telegram_chat_id and telegram_live_bot_token %}
+  "telegram": {
+    "enabled": true,
+    "token": {{ telegram_live_bot_token | to_json }},
+    "chat_id": {{ telegram_chat_id | string | to_json }},
+    "notification_settings": {
+      "status": "silent",
+      "warning": "on",
+      "startup": "on",
+      "entry": "on",
+      "entry_fill": "on",
+      "exit": "on",
+      "exit_fill": "on",
+      "entry_cancel": "silent",
+      "exit_cancel": "silent",
+      "protection_trigger": "silent",
+      "protection_trigger_global": "silent"
+    }
+  },
+{% endif %}
   "bot_name": "trading-live",
   "initial_state": "running",
   "force_entry_enable": false,

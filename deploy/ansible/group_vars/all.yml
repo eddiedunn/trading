@@ -17,6 +17,18 @@ freqtrade_image: docker.io/freqtradeorg/freqtrade:stable
 freqtrade_api_user: freqtrade
 freqtrade_api_password: "{{ lookup('pipe', 'gopass show ' + _trading_gopass_prefix + '/freqtrade-api-password 2>/dev/null || echo changeme') }}"
 
+# Freqtrade's built-in Telegram bot (optional). Telegram allows one poller per bot
+# token, so the live bot and each paper slot need their own bot from @BotFather;
+# the chat id (your own Telegram user id) is shared. Leave the entries out of gopass
+# and Telegram stays off.
+#   gopass insert trading/telegram/chat-id
+#   gopass insert trading/telegram/live-bot-token
+#   gopass insert trading/telegram/paper-bot-token-0   (slot 0; -1, -2 ... for more slots)
+telegram_chat_id: "{{ lookup('pipe', 'gopass show -o ' + _trading_gopass_prefix + '/telegram/chat-id 2>/dev/null || true') }}"
+telegram_live_bot_token: "{{ lookup('pipe', 'gopass show -o ' + _trading_gopass_prefix + '/telegram/live-bot-token 2>/dev/null || true') }}"
+# Paper slot tokens are looked up per slot in the paper-arena-monitor Quadlet template.
+telegram_paper_slots: 6
+
 # Trading Postgres on trinity
 trading_postgres_port: 5432
 trading_postgres_db: trading

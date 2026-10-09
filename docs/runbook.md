@@ -79,6 +79,16 @@ Secrets (gopass): `trading/postgres-password`, `trading/freqtrade-api-password`,
 and — only read for real-money mode — `trading/hyperliquid-private-key`,
 `trading/hyperliquid-wallet-address`.
 
+Telegram (optional): Freqtrade's built-in bot sends entries, exits and the daily
+summary and answers `/status`, `/profit`, `/balance`, `/performance`. Telegram allows
+one poller per bot token, so make one bot per instance with @BotFather, send each
+bot `/start`, then store: `trading/telegram/chat-id` (your Telegram user id),
+`trading/telegram/live-bot-token`, `trading/telegram/paper-bot-token-0` (paper
+slot 0; `-1`, `-2` ... for more slots). `make deploy-paper` / `make deploy-live`
+pick them up; a paper instance only reads the token when it is (re)started, so
+re-queue the running candidate after the first deploy. Missing entries leave
+Telegram off.
+
 ## Strategy file format
 
 One file per strategy, named after its class. It serves every phase:

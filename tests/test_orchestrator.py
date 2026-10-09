@@ -40,6 +40,30 @@ class TestBuildPaperConfig:
         assert "dry_run" in cfg
         assert "api_server" in cfg
 
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"}, clear=True)
+    def test_config_no_telegram_without_token(self):
+        os.environ["FREQTRADE_API_PASSWORD"] = "changeme"
+        cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
+        assert "telegram" not in cfg
+
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme", "TELEGRAM_CHAT_ID": "123",
+                             "TELEGRAM_BOT_TOKEN_0": "tok0", "TELEGRAM_BOT_TOKEN_1": "tok1"}, clear=True)
+    def test_config_telegram_per_slot(self):
+        """Each slot polls its own bot token; a slot without a token gets no Telegram."""
+        cfg0 = _build_paper_config("TestStrat", 8090, "paper_teststrat", slot=0)
+        cfg1 = _build_paper_config("TestStrat", 8091, "paper_teststrat", slot=1)
+        cfg2 = _build_paper_config("TestStrat", 8092, "paper_teststrat", slot=2)
+        assert cfg0["telegram"]["token"] == "tok0" and cfg0["telegram"]["chat_id"] == "123"
+        assert cfg0["telegram"]["enabled"] is True
+        assert cfg1["telegram"]["token"] == "tok1"
+        assert "telegram" not in cfg2
+
+    @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme", "TELEGRAM_CHAT_ID": "123",
+                             "TELEGRAM_BOT_TOKEN": "tok"}, clear=True)
+    def test_config_telegram_plain_token_is_slot_zero(self):
+        assert _build_paper_config("S", 8090, "paper_s", slot=0)["telegram"]["token"] == "tok"
+        assert "telegram" not in _build_paper_config("S", 8091, "paper_s", slot=1)
+
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_port_assignment(self):
         """Config uses provided port for API server."""
