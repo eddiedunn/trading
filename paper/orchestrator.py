@@ -145,14 +145,20 @@ def list_paper_instances() -> list[str]:
 
 _TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
 
-PAIRS = ["BTC/USDC:USDC", "ETH/USDC:USDC", "SOL/USDC:USDC"]
+from backtest_api.universe import COIN_PAIRS
+
+# The scored universe (11 coins since 2026-10-08), in Freqtrade's pair spelling.
+PAIRS = [f"{pair.split('_')[0]}/USDC:USDC" for pair in COIN_PAIRS]
+# Hyperliquid's $10 minimum order: "unlimited" stake over len(PAIRS) slots must leave each slot
+# well above it, so the dry-run wallet scales with the slot count (100 USDC per slot).
+DRY_RUN_WALLET = 100 * len(PAIRS)
 
 
 def _base_config() -> dict:
     """Settings shared by the paper instance and its comparison backtest.
 
     ``stake_amount: unlimited`` splits the wallet evenly across free trade slots,
-    so all ``max_open_trades`` positions can be funded from the 100 USDC wallet.
+    so all ``max_open_trades`` positions can be funded from the wallet (100 USDC per slot).
     """
     return {
         "exchange": {
@@ -164,10 +170,10 @@ def _base_config() -> dict:
         "margin_mode": "isolated",
         "stake_currency": "USDC",
         "stake_amount": "unlimited",
-        "max_open_trades": 3,
+        "max_open_trades": len(PAIRS),
         "timeframe": "4h",
         "dry_run": True,
-        "dry_run_wallet": 100,
+        "dry_run_wallet": DRY_RUN_WALLET,
         "pairlists": [{"method": "StaticPairList"}],
         "entry_pricing": {"price_side": "same"},
         "exit_pricing": {"price_side": "same"},

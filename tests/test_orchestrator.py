@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from paper.orchestrator import (
+    PAIRS,
     spawn_paper_instance,
     teardown_paper_instance,
     teardown_all,
@@ -53,7 +54,7 @@ class TestBuildPaperConfig:
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
         assert cfg["dry_run"] is True
-        assert cfg["dry_run_wallet"] == 100
+        assert cfg["dry_run_wallet"] == 100 * len(PAIRS)
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_stake_settings(self):
@@ -61,16 +62,16 @@ class TestBuildPaperConfig:
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
         assert cfg["stake_amount"] == "unlimited"
-        assert cfg["max_open_trades"] == 3
+        assert cfg["max_open_trades"] == len(PAIRS)
 
     @patch.dict(os.environ, {"FREQTRADE_API_PASSWORD": "changeme"})
     def test_config_pair_whitelist(self):
-        """Config has BTC, ETH, SOL pairs, under exchange where Freqtrade reads them."""
+        """Config lists the scored universe's pairs, under exchange where Freqtrade reads them."""
         cfg = _build_paper_config("TestStrat", 8090, "paper_teststrat")
 
         assert "pair_whitelist" not in cfg
         pairs = cfg["exchange"]["pair_whitelist"]
-        assert len(pairs) == 3
+        assert pairs == PAIRS and len(pairs) == 11
         assert any("BTC" in p for p in pairs)
         assert any("ETH" in p for p in pairs)
         assert any("SOL" in p for p in pairs)

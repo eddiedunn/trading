@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from paper.compare import (
+    PAIRS,
     TOLERANCES,
     candle_floor,
     compare,
@@ -206,7 +207,7 @@ class TestRunComparisonBacktest:
         from paper.orchestrator import FREQTRADE_IMAGE
         assert FREQTRADE_IMAGE in cmd
         config = json.loads((out_dir / "config.json").read_text())
-        assert config["stake_amount"] == "unlimited" and config["max_open_trades"] == 3
+        assert config["stake_amount"] == "unlimited" and config["max_open_trades"] == len(PAIRS)
 
     @patch("paper.compare.subprocess.run", return_value=MagicMock(returncode=2, stderr="no data for pair"))
     def test_freqtrade_error_raises_with_stderr(self, mock_run):
