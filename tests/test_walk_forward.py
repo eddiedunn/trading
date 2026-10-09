@@ -190,10 +190,20 @@ def _write_feathers(data_dir: Path, first: str, last: str) -> None:
 
 @pytest.fixture
 def box_data(tmp_path, monkeypatch):
-    """Feathers shaped like the box's on 2026-10-05: 2023-12-16 04:00 to 2026-10-05 16:00."""
+    """Feathers shaped like the box's on 2026-10-05: 2023-12-16 04:00 to 2026-10-05 16:00,
+    with the holdout pinned to 2026-04-06 so the tests do not follow config/holdout.json."""
     monkeypatch.setenv("TRADING_DATA_DIR", str(tmp_path / "data"))
     _write_feathers(tmp_path / "data", "2023-12-16 04:00", "2026-10-05 16:00")
+    _pin_holdout(tmp_path, monkeypatch, "2026-04-06")
     return tmp_path / "data"
+
+
+def _pin_holdout(tmp_path: Path, monkeypatch, day: str) -> None:
+    """Point TRADING_CONFIG_DIR at a holdout.json with the given start date."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    (config_dir / "holdout.json").write_text(json.dumps({"holdout_start": day}))
+    monkeypatch.setenv("TRADING_CONFIG_DIR", str(config_dir))
 
 
 def _ft_time(dt: datetime) -> str:

@@ -9,7 +9,7 @@ import pytest
 
 from backtest_api import final_test as ft
 from backtest_api.walk_forward import CANDLE, MIN_PROFIT_FACTOR, ft_timerange
-from tests.test_walk_forward import _ft_time, _write_feathers
+from tests.test_walk_forward import _ft_time, _pin_holdout, _write_feathers
 
 HOLDOUT = datetime(2026, 4, 6, tzinfo=timezone.utc)
 LAST = datetime(2026, 10, 5, 16, tzinfo=timezone.utc)
@@ -19,6 +19,7 @@ LAST = datetime(2026, 10, 5, 16, tzinfo=timezone.utc)
 def box_data(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_DATA_DIR", str(tmp_path / "data"))
     _write_feathers(tmp_path / "data", "2023-12-16 04:00", "2026-10-05 16:00")
+    _pin_holdout(tmp_path, monkeypatch, HOLDOUT.date().isoformat())
 
 
 def _daily_profit(n_days: int, mean: float, noise: float, seed: int = 0) -> list:
