@@ -85,7 +85,8 @@ class BtcLeadEvening(IStrategy):
 
     def informative_pairs(self):
         coins = [("BTC/USDC:USDC", self.timeframe)]
-        funding = [(f"{c}/USDC:USDC", "1h", "funding_rate") for c in ("BTC", "ETH", "SOL")]
+        # funding for every traded pair: populate_indicators reads each pair's own funding candles
+        funding = [(pair, "1h", "funding_rate") for pair in self.dp.current_whitelist()]
         return coins + funding
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
